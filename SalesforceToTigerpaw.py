@@ -9,7 +9,7 @@ import chardet
 # --- Flask App Initialization ---
 import os
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'Windfern1!')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'PLEASE_CHANGE_ME_SECRET_KEY')
 
 
 def detect_encoding(input_stream):

@@ -87,7 +87,8 @@ Salesforce-to-Tigerpaw-Converter/
    For production, set this using an environment variable for better security:
    ```python
    import os
-   app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'Windfern1!')
+      app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'PLEASE_CHANGE_ME_SECRET_KEY')
+- **Important:** Always set your own secret key in production. Never use the default placeholder value.
    ```
 - **Port**: Default is `5023`. Change in the last line of `SalesforceToTigerpaw.py` if needed.
 - **Uploads Folder**: Files are not saved server-side; conversion is in-memory for privacy and speed.
