@@ -1,2 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Flask
+instance/
+.env
+
+# Build
+build/
+*.spec
+
+# OS
+.DS_Store
+
+# Uploads
+uploads/
 
 

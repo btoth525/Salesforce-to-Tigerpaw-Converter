@@ -1,61 +1,65 @@
-# Salesforce to Tigerpaw Converter
 
-A web application to convert Salesforce report CSV files into a format compatible with Tigerpaw, built with Flask and Pandas.
+# 🚀 Salesforce-to-Tigerpaw Converter
 
-## Features
+Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. Easily deployable via Docker or Unraid.
 
-- Upload Salesforce CSV files via a modern web interface
-- Automatic encoding and delimiter detection
-- Column mapping and formatting for Tigerpaw import
-- Download the converted CSV instantly
-- Responsive, dark-mode enabled UI
+---
 
-## Getting Started
+## ✨ Features
+- Converts Salesforce CSVs to Tigerpaw-compatible format
+- Web interface (Flask)
+- Easy deployment with Docker
+- Ready for Unraid as a Docker container
 
-### Prerequisites
+---
 
-- Python 3.8+
-- pip
-
-### Installation
-
-1. Clone the repository:
+## 🏁 Quickstart (Local)
+1. **Clone the repo:**
    ```sh
-   git clone https://github.com/btoth525/Docker-To-SalesForce-CSV.git
-   cd Docker-To-SalesForce-CSV
+   git clone https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter.git
+   cd Salesforce-to-Tigerpaw-Converter
    ```
-
-2. Install dependencies:
+2. **Create and activate a Python virtual environment:**
+   ```sh
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+3. **Install dependencies:**
    ```sh
    pip install -r requirements.txt
    ```
+4. **Run the app:**
+   ```sh
+   python SalesforceToTigerpaw.py
+   ```
+   The app will run on port 5023 by default.
 
-### Running the App
+---
 
-```sh
-python SalesforceToTigerpaw.py
-```
+## 🧑‍🔧 Running in Unraid (Docker)
+1. **Build the Docker image:**
+   ```sh
+   docker build -t salesforce-tigerpaw .
+   ```
+2. **Run the container:**
+   ```sh
+   docker run -d -p 5023:5023 --name salesforce-tigerpaw salesforce-tigerpaw
+   ```
+3. **Access the web interface:**
+   - Open your browser and go to: `http://<your-unraid-ip>:5023`
 
-The app will be available at `http://localhost:5023`.
+### 🟢 Unraid Setup Tips
+- Use Unraid's Docker tab to add a new container.
+- Set the repository to your built image or use the CLI above.
+- Map ports and volumes as needed for uploads/outputs.
+- Update the container by pulling the latest repo and rebuilding the image.
 
-## Usage
+---
 
-1. Open the web interface.
-2. Drag and drop or select your Salesforce CSV file.
-3. Click "Convert" to download the Tigerpaw-compatible CSV.
+## 🤝 Contributing
+Pull requests welcome! For major changes, open an issue first.
 
-## Project Structure
+---
 
-- `SalesforceToTigerpaw.py` — Main Flask app
-- `templates/index.html` — Web UI
-- `static/` — Static assets (favicon, etc.)
-- `requirements.txt` — Python dependencies
-
-## Contributing
-
-Pull requests are welcome! For major changes, please open an issue first.
-
-## License
-
+## 📄 License
 MIT
-````
