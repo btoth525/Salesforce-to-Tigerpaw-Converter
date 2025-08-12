@@ -189,15 +189,15 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <button id="theme-toggle" title="Toggle theme">☀️</button>
-        <img class="page-icon" src="{{ url_for('static', filename='favicon.png') }}" alt="Converter Icon">
+    <div class="container" role="main">
+        <button id="theme-toggle" title="Toggle theme" aria-label="Toggle light/dark theme">☀️</button>
+        <img class="page-icon" src="{{ url_for('static', filename='favicon.png') }}" alt="Salesforce to Tigerpaw Converter Icon" width="192" height="192">
         <h1>Salesforce to Tigerpaw Converter</h1>
         {% with messages = get_flashed_messages(with_categories=true) %}
           {% if messages %}
-            <ul class="flashes">
+            <ul class="flashes" aria-live="polite">
             {% for category, message in messages %}
-              <li class="{{ category }}">{{ message }}</li>
+              <li class="{{ category }}" role="alert">{{ message }}</li>
             {% endfor %}
             </ul>
           {% endif %}
@@ -205,18 +205,19 @@
         <div class="description">
             <p>This converter prepares a Salesforce report CSV file for import into Tigerpaw.</p>
         </div>
-        <form method="post" enctype="multipart/form-data" id="upload-form">
-            <div class="drop-zone" tabindex="0">
-                <svg class="drop-zone-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+        <form method="post" enctype="multipart/form-data" id="upload-form" aria-label="CSV Upload Form">
+            <div class="drop-zone" tabindex="0" aria-label="File drop zone" aria-describedby="drop-zone-desc">
+                <svg class="drop-zone-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"></path>
                 </svg>
-                <p>Drag & Drop your CSV file here</p>
+                <p id="drop-zone-desc">Drag & Drop your CSV file here</p>
                 <p>or</p>
-                <input type="file" name="file" id="file" accept=".csv">
-                <button type="button" id="upload-button-trigger">Upload</button>
+                <label for="file" style="display:none;">CSV file</label>
+                <input type="file" name="file" id="file" accept=".csv" aria-label="CSV file input">
+                <button type="button" id="upload-button-trigger" aria-label="Open file picker">Upload</button>
             </div>
-            <span id="filename-display">No file chosen</span>
-            <input type="submit" value="Convert" id="submit-button">
+            <span id="filename-display" aria-live="polite">No file chosen</span>
+            <input type="submit" value="Convert" id="submit-button" aria-label="Convert CSV">
             <div class="attribution">
                 <p>This was coded and brought to you by Brandon Toth from ASAP SECURITY SERVICES</p>
             </div>

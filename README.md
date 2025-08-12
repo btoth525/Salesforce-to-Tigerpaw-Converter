@@ -1,7 +1,35 @@
+## 📖 How-To Guide
+
+For a step-by-step tutorial, see the Scribe guide:
+
+[How to Use Brandon's Salesforce To TigerPaw Converter](https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ)
+
+## 📬 Contact & Support
+
+For questions or support, contact Brandon Toth at ASAP Security Services.
+
 
 # 🚀 Salesforce-to-Tigerpaw Converter
 
+![Version](https://img.shields.io/badge/version-1.0-blue)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+<!-- If you add CI/CD, add a status badge here -->
+
+
+
 Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. Easily deployable via Docker or Unraid.
+
+---
+
+## 🖼️ Screenshot
+<!-- Replace with a real screenshot or GIF of your app UI -->
+![App Screenshot Placeholder](https://via.placeholder.com/750x400?text=App+Screenshot)
+
+---
+## 📋 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for update history.
+
 
 ---
 
@@ -12,6 +40,23 @@ Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. 
 - Ready for Unraid as a Docker container
 
 ---
+
+
+## 🗂️ Project Structure
+
+```
+Salesforce-to-Tigerpaw-Converter/
+├── SalesforceToTigerpaw.py         # Main Flask app and CSV converter logic
+├── requirements.txt                # Python dependencies
+├── Dockerfile                      # Docker build instructions
+├── templates/
+│   └── index.html                  # Web interface HTML
+├── static/
+│   └── favicon.png                 # App icon
+├── uploads/                        # Uploaded files (ignored by git)
+├── build/                          # Build artifacts (ignored by git)
+└── README.md                       # Project documentation
+```
 
 ## 🏁 Quickstart (Local)
 1. **Clone the repo:**
@@ -33,6 +78,37 @@ Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. 
    python SalesforceToTigerpaw.py
    ```
    The app will run on port 5023 by default.
+## 🧑‍💻 Main Python Functions
+
+- `process_file(input_stream)`: Reads and converts a Salesforce CSV to Tigerpaw format.
+- `detect_encoding(input_stream)`: Detects file encoding for robust CSV parsing.
+- `parse_csv(input_stream, encoding)`: Parses CSV with multiple delimiters.
+- `transform_salesforce_df(df)`: Renames, adds, and reorders columns for Tigerpaw import.
+
+## ⚙️ Configuration
+
+- **Flask Secret Key**: Set in `SalesforceToTigerpaw.py` (`app.config['SECRET_KEY']`).
+- **Port**: Default is `5023`. Change in the last line of `SalesforceToTigerpaw.py` if needed.
+- **Uploads Folder**: Files are not saved server-side; conversion is in-memory for privacy and speed.
+
+## 🛠️ Troubleshooting
+
+- **CSV Errors**: Ensure your Salesforce export includes the required columns: `Product Code`, `Description`, `Quantity`, `Net Unit Price`, `Unit Cost`.
+- **File Type**: Only `.csv` files are accepted.
+- **Empty File**: The app will alert you if the uploaded file is empty or invalid.
+- **Browser Issues**: Use a modern browser for best results.
+
+## 🔄 Updating Dependencies
+
+To update Python packages:
+```sh
+pip install --upgrade -r requirements.txt
+```
+Or update a specific package:
+```sh
+pip install --upgrade <package-name>
+```
+
 
 ---
 
@@ -62,4 +138,11 @@ Pull requests welcome! For major changes, open an issue first.
 ---
 
 ## 📄 License
-MIT
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+## 📬 Contact & Support
+
+For questions or support, contact Brandon Toth at ASAP Security Services.
