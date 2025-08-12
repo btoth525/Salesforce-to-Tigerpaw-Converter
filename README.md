@@ -21,11 +21,7 @@ Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. 
 
 ---
 
-## 🖼️ Screenshot
-<!-- Replace with a real screenshot or GIF of your app UI -->
-![App Screenshot Placeholder](https://via.placeholder.com/750x400?text=App+Screenshot)
 
----
 ## 📋 Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for update history.
@@ -88,6 +84,11 @@ Salesforce-to-Tigerpaw-Converter/
 ## ⚙️ Configuration
 
 - **Flask Secret Key**: Set in `SalesforceToTigerpaw.py` (`app.config['SECRET_KEY']`).
+   For production, set this using an environment variable for better security:
+   ```python
+   import os
+   app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'Windfern1!')
+   ```
 - **Port**: Default is `5023`. Change in the last line of `SalesforceToTigerpaw.py` if needed.
 - **Uploads Folder**: Files are not saved server-side; conversion is in-memory for privacy and speed.
 
