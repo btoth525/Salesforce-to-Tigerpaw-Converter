@@ -15,8 +15,8 @@ Convert Salesforce CSV reports to Tigerpaw format with a simple Python app, pack
 ## 🏁 Quickstart (Local)
 1. **Clone the repo:**
    ```sh
-   git clone https://github.com/btoth525/Docker-To-SalesForce-CSV.git
-   cd Docker-To-SalesForce-CSV
+   git clone https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter.git
+   cd Salesforce-to-Tigerpaw-Converter
    ```
 2. **Create and activate a Python virtual environment:**
    ```sh
