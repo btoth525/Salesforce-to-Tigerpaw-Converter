@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>Salesforce to Tigerpaw Converter</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #0056b3;
+            --primary-hover: #004494;
+            --secondary-color: #6c757d;
+            --secondary-hover: #5a6268;
+            --light-bg: #f8f9fa;
+            --white: #ffffff;
+            --dark-bg: #343a40;
+            --dark-text: #f8f9fa;
+            --dark-surface: #495057;
+            --dark-border: #6c757d;
+            --very-dark-bg: #1c1e21;
+            --border-color: #dee2e6;
+            --border-highlight-color: #28a745;
+            --text-color: #212529;
+            --text-muted: #6c757d;
+            --error-color: #dc3545;
+            --info-color: #17a2b8;
+            --border-radius: 0.4rem;
+            --box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+            --box-shadow-dark: 0 5px 15px rgba(0, 0, 0, 0.25);
+            --focus-color: var(--primary-color);
+            --focus-color-transparent: rgba(0, 86, 179, 0.3);
+            --page-bg: linear-gradient(120deg, #eaf2ff 0%, var(--light-bg) 100%);
+            --text-main: var(--text-color);
+            --text-secondary: var(--text-muted);
+            --surface-bg: var(--white);
+            --surface-alt-bg: var(--light-bg);
+            --current-border-color: var(--border-color);
+            --current-box-shadow: var(--box-shadow);
+            --button-secondary-bg: var(--secondary-color);
+            --button-secondary-hover-bg: var(--secondary-hover);
+            --icon-color: var(--text-muted);
+        }
+        .dark-mode {
+            --page-bg: var(--very-dark-bg);
+            --text-main: var(--dark-text);
+            --text-secondary: #adb5bd;
+            --surface-bg: var(--dark-bg);
+            --surface-alt-bg: var(--dark-surface);
+            --current-border-color: var(--dark-border);
+            --current-box-shadow: var(--box-shadow-dark);
+            --button-secondary-bg: #5a6268;
+            --button-secondary-hover-bg: var(--secondary-color);
+            --icon-color: #adb5bd;
+            --focus-color: #4dabf7;
+            --focus-color-transparent: rgba(77, 171, 247, 0.3);
+            --border-highlight-color: #2ecc71;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--page-bg);
+            color: var(--text-main);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+        .container {
+            background-color: var(--surface-bg);
+            padding: 2.5rem 2rem 2rem 2rem;
+            border-radius: var(--border-radius);
+            box-shadow: var(--current-box-shadow);
+            max-width: 500px;
+            margin: 3rem auto 2rem auto;
+            border-top: 4px solid var(--primary-color);
+            text-align: center;
+        }
+        .page-icon {
+            width: 96px;
+            height: 96px;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+        }
+        .description {
+            margin-bottom: 2rem;
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+        .drop-zone {
+            border: 2px dashed var(--current-border-color);
+            border-radius: var(--border-radius);
+            padding: 2rem 1rem;
+            background-color: var(--surface-alt-bg);
+            margin-bottom: 1.5rem;
+            transition: border-color 0.3s, background-color 0.3s;
+        }
+        .drop-zone-icon {
+            width: 40px;
+            height: 40px;
+            margin-bottom: 0.5rem;
+        }
+        #upload-button-trigger {
+            margin-top: 0.5rem;
+            padding: 0.5rem 1.2rem;
+            font-size: 1rem;
+            background-color: var(--button-secondary-bg);
+            color: var(--white);
+            border: none;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        #upload-button-trigger:hover {
+            background-color: var(--button-secondary-hover-bg);
+        }
+        #filename-display {
+            display: block;
+            margin-bottom: 1.2rem;
+            font-size: 1rem;
+            color: var(--text-secondary);
+        }
+        #submit-button {
+            padding: 0.7rem 2.2rem;
+            font-size: 1.1rem;
+            font-weight: 500;
+            background-color: var(--primary-color);
+            color: var(--white);
+            border: none;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            margin-right: 0.5rem;
+            margin-bottom: 1rem;
+            transition: background-color 0.2s;
+        }
+        #submit-button:hover {
+            background-color: var(--primary-hover);
+        }
+        #reset-button {
+            padding: 0.7rem 1.5rem;
+            font-size: 1.1rem;
+            background-color: var(--button-secondary-bg);
+            color: var(--white);
+            border: none;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            margin-bottom: 1rem;
+            transition: background-color 0.2s;
+        }
+        #reset-button:hover {
+            background-color: var(--button-secondary-hover-bg);
+        }
+        .attribution {
+            margin-top: 1.5rem;
+            font-size: 0.95em;
+            color: var(--text-secondary);
+            opacity: 0.7;
+        }
+        footer {
+            margin-top: 2rem;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.95em;
+            opacity: 0.7;
+        }
+        #theme-toggle {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: none;
+            border: 1px solid var(--current-border-color);
+            color: var(--text-secondary);
+            padding: 0.3rem 0.6rem;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: color 0.3s, border-color 0.3s;
+        }
+        #theme-toggle:hover {
+            color: var(--text-main);
+            border-color: var(--text-main);
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 1.2rem 0.5rem;
+                max-width: 98vw;
+            }
+            h1 {
+                font-size: 1.3rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main>
+    <div class="container" role="main">
+        <button id="theme-toggle" title="Toggle theme" aria-label="Toggle light/dark theme">☀️</button>
+        <img class="page-icon" src="{{ url_for('static', filename='favicon.png') }}" alt="Salesforce to Tigerpaw Converter Icon">
+        <h1>Salesforce to Tigerpaw Converter</h1>
+        <div class="description">
+            <p>This converter prepares a Salesforce report CSV file for import into Tigerpaw.</p>
+        </div>
+        <form method="post" enctype="multipart/form-data" id="upload-form" aria-label="CSV Upload Form">
+            <div class="drop-zone" tabindex="0" aria-label="File drop zone" aria-describedby="drop-zone-desc">
+                <svg class="drop-zone-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"></path>
+                </svg>
+                <p id="drop-zone-desc">Drag & Drop your CSV file here</p>
+                <p>or</p>
+                <label for="file" style="display:none;">CSV file</label>
+                <input type="file" name="file" id="file" accept=".csv" aria-label="CSV file input">
+                <button type="button" id="upload-button-trigger" aria-label="Open file picker">Upload</button>
+            </div>
+            <span id="filename-display" aria-live="polite">No file chosen</span>
+            <input type="submit" value="Convert" id="submit-button" aria-label="Convert CSV">
+            <button type="button" id="reset-button" aria-label="Reset form">Reset</button>
+            <div class="attribution">
+                <p>This was coded and brought to you by Brandon Toth from ASAP SECURITY SERVICES</p>
+            </div>
+        </form>
+    </div>
+    </main>
+    <footer>
+        <section>
+            <strong>Contact:</strong> Brandon Toth &lt;<a href="mailto:Btoth@serviceasap.com">Btoth@serviceasap.com</a>&gt;
+        </section>
+        <section>
+            &copy; {{ now().year if now else '2025' }} ASAP Security Services
+        </section>
+    </footer>
+    <script>
+        // --- DOM Elements ---
+        const dropZone = document.querySelector('.drop-zone');
+        const fileInput = document.getElementById('file');
+        const filenameDisplay = document.getElementById('filename-display');
+        const form = document.getElementById('upload-form');
+        const uploadButtonTrigger = document.getElementById('upload-button-trigger');
+        const themeToggleButton = document.getElementById('theme-toggle');
+        const resetButton = document.getElementById('reset-button');
+
+        // --- Drag & Drop / File Input Listeners ---
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, highlight, false);
+        });
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, unhighlight, false);
+        });
+        dropZone.addEventListener('drop', handleDrop, false);
+        fileInput.addEventListener('change', handleFileSelect, false);
+        dropZone.addEventListener('click', (e) => {
+            if (e.target.closest('.drop-zone-icon') || e.target.tagName === 'BUTTON') { return; }
+            if (e.target === dropZone || e.target.tagName === 'P') {
+                fileInput.click();
+            }
+        });
+        dropZone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        });
+        if (uploadButtonTrigger) {
+            uploadButtonTrigger.addEventListener('click', () => {
+                fileInput.click();
+            });
+        }
+
+        // --- Helper Functions ---
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        function highlight(e) {
+            dropZone.classList.add('dragover');
+        }
+        function unhighlight(e) {
+            dropZone.classList.remove('dragover');
+        }
+        function handleDrop(e) {
+            try {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files.length === 0) {
+                    throw new Error('No files dropped');
+                }
+                fileInput.files = files;
+                handleFileSelect({ target: fileInput });
+            } catch (err) {
+                displayDropZoneError(`Error processing dropped file: ${err.message}`);
+            }
+        }
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            let isValid = false;
+            let userMessage = null;
+            dropZone.classList.remove('error-state');
+            if (files.length > 0) {
+                if (files.length > 1) {
+                    userMessage = 'Error: Please select only one file.';
+                    fileInput.value = '';
+                } else {
+                    const file = files[0];
+                    const fileName = file.name.toLowerCase();
+                    const isCsv = fileName.endsWith ? fileName.endsWith('.csv') : fileName.indexOf('.csv') === fileName.length - 4;
+                    if (!isCsv) {
+                        userMessage = 'Error: Please select a .csv file.';
+                        fileInput.value = '';
+                    } else {
+                        filenameDisplay.textContent = `Selected: ${file.name}`;
+                        filenameDisplay.style.color = 'var(--text-secondary)';
+                        isValid = true;
+                    }
+                }
+            } else {
+                filenameDisplay.textContent = 'No file chosen';
+                filenameDisplay.style.color = 'var(--text-secondary)';
+            }
+            if (!isValid && userMessage) {
+                displayDropZoneError(userMessage);
+            }
+        }
+        function displayDropZoneError(message) {
+            filenameDisplay.textContent = message;
+            filenameDisplay.style.color = 'var(--error-color)';
+            dropZone.classList.add('error-state');
+            setTimeout(() => { dropZone.classList.remove('error-state'); }, 1500);
+        }
+
+        // --- Form Submit ---
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (fileInput.files.length === 0) {
+                displayDropZoneError('Error: Please select a file first.');
+                return;
+            }
+            try {
+                const response = await fetch('/', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
+                const contentType = response.headers.get('Content-Type') || '';
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => response.text());
+                    const errorMessage = typeof errorData === 'object' && errorData.error
+                        ? errorData.error
+                        : `Server error: ${response.statusText}`;
+                    throw new Error(errorMessage);
+                }
+                if (!contentType.includes('text/csv')) {
+                    const errorText = await response.text();
+                    throw new Error('Invalid response: not a CSV file');
+                }
+                const blob = await response.blob();
+                const contentDisposition = response.headers.get('Content-Disposition') || '';
+                const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+                const filename = filenameMatch ? filenameMatch[1] : 'converted.csv';
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                // Reset form
+                fileInput.value = '';
+                filenameDisplay.textContent = 'No file chosen';
+            } catch (err) {
+                displayDropZoneError(`Error processing file: ${err.message}`);
+            }
+        });
+
+        // --- Reset Button ---
+        resetButton.addEventListener('click', () => {
+            fileInput.value = '';
+            filenameDisplay.textContent = 'No file chosen';
+            filenameDisplay.style.color = 'var(--text-secondary)';
+            dropZone.classList.remove('error-state');
+        });
+
+        // --- Dark Mode ---
+        function applyTheme(theme) {
+            if (theme === 'dark') {
+                document.body.classList.add('dark-mode');
+                themeToggleButton.textContent = '☀️';
+                themeToggleButton.title = 'Switch to light theme';
+            } else {
+                document.body.classList.remove('dark-mode');
+                themeToggleButton.textContent = '🌙';
+                themeToggleButton.title = 'Switch to dark theme';
+            }
+        }
+        if (themeToggleButton) {
+            themeToggleButton.addEventListener('click', () => {
+                let newTheme = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
+                applyTheme(newTheme);
+                try {
+                    localStorage.setItem('theme', newTheme);
+                } catch (e) {}
+            });
+        }
+        document.addEventListener('DOMContentLoaded', () => {
+            let savedTheme = null;
+            try {
+                savedTheme = localStorage.getItem('theme');
+            } catch (e) {}
+            const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+            let currentTheme = savedTheme || (prefersDark ? 'dark' : 'light');
+            applyTheme(currentTheme);
+        });
+    </script>
+</body>
+</html>
