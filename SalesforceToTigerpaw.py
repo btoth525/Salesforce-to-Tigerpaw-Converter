@@ -68,19 +68,20 @@ def transform_salesforce_df(df):
     return df[ordered + others]
 
 def process_file(input_stream):
-    """Reads Salesforce CSV from stream, processes, and returns as BytesIO."""
+    """Reads Salesforce CSV from stream, processes, and returns (BytesIO, row_count)."""
     try:
         encoding = detect_encoding(input_stream)
         df = parse_csv(input_stream, encoding)
         if df is None or df.empty:
             raise ValueError("The uploaded CSV file is empty or could not be parsed.")
         transformed_df = transform_salesforce_df(df)
+        row_count = len(transformed_df)
         # Write with Windows line endings; BOM added by encode('utf-8-sig') for Excel/Tigerpaw compatibility
         output_stream = io.StringIO()
         transformed_df.to_csv(output_stream, index=False, lineterminator='\r\n')
         binary_stream = io.BytesIO(output_stream.getvalue().encode('utf-8-sig'))
         binary_stream.seek(0)
-        return binary_stream
+        return binary_stream, row_count
     except pd.errors.EmptyDataError:
         raise ValueError("The uploaded CSV file is empty or could not be parsed.")
     except pd.errors.ParserError as e:
@@ -107,8 +108,8 @@ def upload_file_route():
     filename = secure_filename(file.filename)
     output_filename = os.path.splitext(filename)[0] + "_converted.csv"
     try:
-        binary_stream = process_file(file.stream)
-        logger.info("Successfully converted file: %s", filename)
+        binary_stream, row_count = process_file(file.stream)
+        logger.info("Successfully converted file: %s (%d rows)", filename, row_count)
         return Response(
             binary_stream.getvalue(),
             mimetype='text/csv',
@@ -117,7 +118,9 @@ def upload_file_route():
                 'Content-Type': 'text/csv; charset=utf-8',
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Pragma': 'no-cache',
-                'Expires': '0'
+                'Expires': '0',
+                'X-Row-Count': str(row_count),
+                'Access-Control-Expose-Headers': 'X-Row-Count',
             }
         )
     except (ValueError, Exception) as e:

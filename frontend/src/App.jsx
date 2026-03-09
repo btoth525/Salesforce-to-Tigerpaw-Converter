@@ -1,10 +1,39 @@
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import './App.css';
 
 const MAX_FILE_SIZE_MB = 10;
 
+// The exact columns Salesforce exports and what they become in Tigerpaw
+const SF_REQUIRED = ['Product Code', 'Description', 'Quantity', 'Net Unit Price', 'Unit Cost'];
+const COLUMN_MAP = {
+  'Product Code': 'Part Number',
+  'Description': 'Description',
+  'Quantity': 'Quantity',
+  'Net Unit Price': 'Price',
+  'Unit Cost': 'Cost',
+};
+
+// ── CSV parsing helpers (runs entirely in the browser) ─────────────────────
+function detectDelimiter(line) {
+  const counts = { ',': 0, ';': 0, '\t': 0 };
+  for (const ch of line) if (ch in counts) counts[ch]++;
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function parseCSVPreview(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return null;
+  const delim = detectDelimiter(lines[0]);
+  const parseRow = line => line.split(delim).map(c => c.replace(/^"|"$/g, '').trim());
+  const headers = parseRow(lines[0]);
+  const rows = lines.slice(1, 4).map(parseRow);
+  return { headers, rows, totalRows: lines.length - 1 };
+}
+
+// ── Main App ───────────────────────────────────────────────────────────────
 function App() {
   const fileInput = useRef();
+
   const [status, setStatus] = useState('');
   const [statusType, setStatusType] = useState(''); // 'success' | 'error' | 'info'
   const [converting, setConverting] = useState(false);
@@ -12,37 +41,73 @@ function App() {
   const [showEasterEgg, setShowEasterEgg] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [preview, setPreview] = useState(null);       // parsed CSV preview
+  const [rowsConverted, setRowsConverted] = useState(null);
+  const [lastBlob, setLastBlob] = useState(null);     // kept for clipboard copy
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [darkMode, setDarkMode] = useState(
+    () => localStorage.getItem('darkMode') === 'true'
+  );
 
-  const setMsg = (msg, type = 'info') => {
-    setStatus(msg);
-    setStatusType(type);
+  // Apply dark mode class to <body> and persist
+  useEffect(() => {
+    document.body.classList.toggle('dark', darkMode);
+    localStorage.setItem('darkMode', darkMode);
+  }, [darkMode]);
+
+  // Keyboard shortcut: Ctrl/Cmd + Enter to convert
+  useEffect(() => {
+    const handler = e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && selectedFile && !converting) {
+        document.getElementById('convert-form')?.requestSubmit();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedFile, converting]);
+
+  const setMsg = (msg, type = 'info') => { setStatus(msg); setStatusType(type); };
+
+  // Parse the selected file in the browser and populate the preview panel
+  const parseFilePreview = file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const parsed = parseCSVPreview(e.target.result);
+      setPreview(parsed);
+    };
+    reader.readAsText(file);
   };
 
-  const validateFile = (file) => {
+  const validateFile = file => {
     if (!file) return 'Please select a CSV file.';
     if (!file.name.toLowerCase().endsWith('.csv')) return 'Only CSV files are allowed.';
-    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) return `File is too large. Maximum size is ${MAX_FILE_SIZE_MB} MB.`;
+    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024)
+      return `File too large. Maximum size is ${MAX_FILE_SIZE_MB} MB.`;
     return null;
   };
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0] || null;
+  const applyFile = file => {
     setSelectedFile(file);
     setMsg('');
+    setPreview(null);
+    setRowsConverted(null);
+    setLastBlob(null);
+    if (file && file.name.toLowerCase().endsWith('.csv')) parseFilePreview(file);
   };
 
-  const handleUpload = async (e) => {
+  const handleFileChange = e => applyFile(e.target.files[0] || null);
+
+  const handleUpload = async e => {
     e.preventDefault();
     const file = selectedFile || fileInput.current?.files[0];
-    const validationError = validateFile(file);
-    if (validationError) {
-      setMsg(validationError, 'error');
-      return;
-    }
+    const err = validateFile(file);
+    if (err) { setMsg(err, 'error'); return; }
 
-    setMsg('Uploading and converting...', 'info');
+    setMsg('Uploading and converting…', 'info');
     setConverting(true);
     setShowConfetti(false);
+    setRowsConverted(null);
+    setLastBlob(null);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -50,11 +115,17 @@ function App() {
     try {
       const response = await fetch('/', { method: 'POST', body: formData });
       if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        setMsg(err.error || 'Conversion failed. Please try again.', 'error');
+        const errData = await response.json().catch(() => ({}));
+        setMsg(errData.error || 'Conversion failed. Please try again.', 'error');
         return;
       }
+
+      const rows = parseInt(response.headers.get('X-Row-Count') || '0', 10);
       const blob = await response.blob();
+      setLastBlob(blob);
+      if (rows > 0) setRowsConverted(rows);
+
+      // Trigger download
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -63,7 +134,13 @@ function App() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-      setMsg('Conversion successful! Your download has started.', 'success');
+
+      setMsg(
+        rows > 0
+          ? `Conversion successful! ${rows} row${rows !== 1 ? 's' : ''} converted — download started.`
+          : 'Conversion successful! Download started.',
+        'success'
+      );
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 2500);
     } catch {
@@ -73,33 +150,51 @@ function App() {
     }
   };
 
-  // Drag-and-drop handlers
-  const onDragOver = useCallback((e) => { e.preventDefault(); setDragging(true); }, []);
-  const onDragLeave = useCallback((e) => { e.preventDefault(); setDragging(false); }, []);
-  const onDrop = useCallback((e) => {
+  const handleCopyCSV = async () => {
+    if (!lastBlob) return;
+    try {
+      const text = await lastBlob.text();
+      await navigator.clipboard.writeText(text);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch {
+      setMsg('Could not copy to clipboard — try downloading instead.', 'error');
+    }
+  };
+
+  // Drag-and-drop
+  const onDragOver = useCallback(e => { e.preventDefault(); setDragging(true); }, []);
+  const onDragLeave = useCallback(e => { e.preventDefault(); setDragging(false); }, []);
+  const onDrop = useCallback(e => {
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files[0] || null;
-    if (file) {
-      setSelectedFile(file);
-      setMsg('');
-      if (fileInput.current) {
-        // Sync the native input (for form submit fallback)
-        const dt = new DataTransfer();
-        dt.items.add(file);
-        fileInput.current.files = dt.files;
-      }
+    if (!file) return;
+    applyFile(file);
+    if (fileInput.current) {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      fileInput.current.files = dt.files;
     }
   }, []);
 
-  // Easter egg: clicking the icon triggers a big confetti show
   const handleIconClick = () => {
     setShowEasterEgg(true);
     setTimeout(() => setShowEasterEgg(false), 2500);
   };
 
   return (
-    <div className="container">
+    <div className={`container${darkMode ? ' dark' : ''}`}>
+      {/* Dark mode toggle */}
+      <button
+        className="dark-toggle"
+        onClick={() => setDarkMode(d => !d)}
+        aria-label="Toggle dark mode"
+        title="Toggle dark mode"
+      >
+        {darkMode ? '☀️' : '🌙'}
+      </button>
+
       <img
         src="/favicon.png"
         alt="App Icon"
@@ -110,16 +205,21 @@ function App() {
       />
       <h1>Salesforce → Tigerpaw CSV Magic</h1>
 
-      <form onSubmit={handleUpload} className="upload-form">
+      <form id="convert-form" onSubmit={handleUpload} className="upload-form">
+        {/* Drop zone */}
         <div
-          className={`drop-zone${dragging ? ' drop-zone--active' : ''}${selectedFile ? ' drop-zone--has-file' : ''}`}
+          className={[
+            'drop-zone',
+            dragging ? 'drop-zone--active' : '',
+            selectedFile ? 'drop-zone--has-file' : '',
+          ].join(' ')}
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
           onClick={() => fileInput.current?.click()}
           role="button"
           tabIndex={0}
-          onKeyDown={(e) => e.key === 'Enter' && fileInput.current?.click()}
+          onKeyDown={e => e.key === 'Enter' && fileInput.current?.click()}
           aria-label="Click or drag and drop a CSV file here"
         >
           <input
@@ -133,27 +233,63 @@ function App() {
             <>
               <span className="drop-zone__icon">📄</span>
               <span className="drop-zone__filename">{selectedFile.name}</span>
-              <span className="drop-zone__size">({(selectedFile.size / 1024).toFixed(1)} KB)</span>
+              <span className="drop-zone__size">
+                ({(selectedFile.size / 1024).toFixed(1)} KB)
+              </span>
+              <span className="drop-zone__change">Click to change file</span>
             </>
           ) : (
             <>
               <span className="drop-zone__icon">📂</span>
-              <span className="drop-zone__hint">Drag &amp; drop your CSV here, or <u>click to browse</u></span>
-              <span className="drop-zone__sub">Max {MAX_FILE_SIZE_MB} MB</span>
+              <span className="drop-zone__hint">
+                Drag &amp; drop your CSV here, or <u>click to browse</u>
+              </span>
+              <span className="drop-zone__sub">Max {MAX_FILE_SIZE_MB} MB • .csv only</span>
             </>
           )}
         </div>
 
-        <button type="submit" disabled={converting} className={converting ? 'btn--loading' : ''}>
-          {converting ? <><span className="spinner" /> Converting…</> : 'Convert & Download'}
+        {/* Live preview panel — appears immediately after file selection */}
+        {preview && <PreviewPanel preview={preview} />}
+
+        <button
+          type="submit"
+          disabled={converting}
+          className={converting ? 'btn--loading' : ''}
+        >
+          {converting
+            ? <><span className="spinner" /> Converting…</>
+            : 'Convert & Download'}
         </button>
+
+        {selectedFile && !converting && (
+          <p className="shortcut-hint">
+            <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to convert
+          </p>
+        )}
       </form>
 
+      {/* Status message */}
       {status && (
         <div className={`status status--${statusType}`} role="status" aria-live="polite">
           {statusType === 'success' && '✅ '}
           {statusType === 'error' && '❌ '}
           {status}
+        </div>
+      )}
+
+      {/* Post-conversion actions */}
+      {lastBlob && (
+        <div className="post-actions">
+          <button className="copy-btn" onClick={handleCopyCSV}>
+            {copySuccess ? '✅ Copied to clipboard!' : '📋 Copy CSV to Clipboard'}
+          </button>
+          {rowsConverted !== null && (
+            <div className="stat-badge">
+              <span className="stat-badge__number">{rowsConverted}</span>
+              <span className="stat-badge__label">rows converted</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -172,6 +308,76 @@ function App() {
   );
 }
 
+// ── Preview Panel ──────────────────────────────────────────────────────────
+function PreviewPanel({ preview }) {
+  const { headers, rows, totalRows } = preview;
+  const missing = SF_REQUIRED.filter(c => !headers.includes(c));
+  const allGood = missing.length === 0;
+
+  return (
+    <div className={`preview-panel${allGood ? '' : ' preview-panel--warn'}`}>
+      <div className="preview-header">
+        <span className="preview-title">📊 File Preview</span>
+        <span className="preview-meta">{totalRows} row{totalRows !== 1 ? 's' : ''} detected</span>
+      </div>
+
+      {/* Column mapping status */}
+      <div className="col-map-grid">
+        {SF_REQUIRED.map(col => {
+          const found = headers.includes(col);
+          return (
+            <div key={col} className={`col-badge ${found ? 'col-badge--ok' : 'col-badge--missing'}`}>
+              <span className="col-badge__icon">{found ? '✅' : '❌'}</span>
+              <span className="col-badge__sf">{col}</span>
+              {found && (
+                <>
+                  <span className="col-badge__arrow">→</span>
+                  <span className="col-badge__tp">{COLUMN_MAP[col]}</span>
+                </>
+              )}
+              {!found && <span className="col-badge__warn">missing</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Sample data table — only shown when all columns are present */}
+      {allGood && rows.length > 0 && (
+        <div className="preview-table-wrap">
+          <table className="preview-table">
+            <thead>
+              <tr>
+                {SF_REQUIRED.map(col => <th key={col}>{col}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => {
+                const idxMap = SF_REQUIRED.map(col => headers.indexOf(col));
+                return (
+                  <tr key={i}>
+                    {idxMap.map((idx, j) => (
+                      <td key={j}>{idx >= 0 && row[idx] ? row[idx] : <span className="cell-empty">—</span>}</td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {rows.length > 0 && <p className="preview-more">Showing first {rows.length} of {totalRows} rows</p>}
+        </div>
+      )}
+
+      {!allGood && (
+        <p className="preview-warning">
+          ⚠️ {missing.length} required column{missing.length > 1 ? 's are' : ' is'} missing:{' '}
+          <strong>{missing.join(', ')}</strong>. Conversion will fail.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Confetti ───────────────────────────────────────────────────────────────
 function ConfettiBurst({ big }) {
   const bursts = Array.from({ length: big ? 18 : 7 });
   return (
@@ -185,7 +391,7 @@ function ConfettiBurst({ big }) {
           zIndex: 9999,
           fontSize: `${2 + Math.random() * (big ? 4 : 2.5)}rem`,
           animation: 'fadeConfetti 2.2s linear',
-          transform: `rotate(${Math.random() * 360}deg)`
+          transform: `rotate(${Math.random() * 360}deg)`,
         }}>
           <span role="img" aria-label="confetti">{['🎉', '🎊', '✨', '💥', '🎈'][i % 5]}</span>
         </div>
@@ -194,22 +400,22 @@ function ConfettiBurst({ big }) {
   );
 }
 
+// ── Footer ─────────────────────────────────────────────────────────────────
 function Footer() {
   return (
-    <footer style={{ marginTop: '2.5rem', color: '#888', fontSize: '0.98rem', opacity: 0.85 }}>
+    <footer className="footer">
       <span>© {new Date().getFullYear()} Brandon Toth • Made with <span role="img" aria-label="love">❤️</span> for Service ASAP</span>
-      <span style={{ marginLeft: 12, fontSize: '0.93rem' }}> | v1.1.0-beta</span>
-      <span style={{ marginLeft: 12, fontSize: '0.93rem' }}> | Last updated: Mar 2026</span>
-      <span style={{ marginLeft: 12 }}>
-        <a
-          href="https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: '#2a5298', textDecoration: 'underline', fontWeight: 600 }}
-        >
-          How to use
-        </a>
-      </span>
+      <span className="footer-sep">|</span>
+      <span>v1.1.0-beta</span>
+      <span className="footer-sep">|</span>
+      <a
+        href="https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="footer-link"
+      >
+        How to use
+      </a>
     </footer>
   );
 }
