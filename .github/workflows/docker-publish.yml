@@ -1,0 +1,52 @@
+name: Build & Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/beta-improvements-*'
+    tags:
+      - 'v*'
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.CR_PAT }}
+
+      - name: Build Docker image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          BRANCH_TAG=$(echo "${{ github.ref_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+          docker build -t "${IMAGE}:${BRANCH_TAG}" .
+          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+          echo "BRANCH_TAG=${BRANCH_TAG}" >> $GITHUB_ENV
+
+      - name: Push Docker image
+        run: |
+          docker push "${IMAGE}:${BRANCH_TAG}"
+          if [[ "${{ github.ref }}" == refs/heads/claude/* ]]; then
+            docker tag "${IMAGE}:${BRANCH_TAG}" "${IMAGE}:beta"
+            docker push "${IMAGE}:beta"
+          fi
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            docker tag "${IMAGE}:${BRANCH_TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
