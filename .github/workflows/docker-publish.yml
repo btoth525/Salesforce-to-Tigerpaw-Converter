@@ -35,6 +35,15 @@ jobs:
           echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
           echo "BRANCH_TAG=${BRANCH_TAG}" >> $GITHUB_ENV
 
+      - name: Debug GHCR auth
+        run: |
+          echo "Testing GHCR token access..."
+          curl -sI -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/v2/" | head -5
+          echo "Token permissions in this job:"
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}" | python3 -c "import json,sys; d=json.load(sys.stdin); print('private:', d.get('private'))" 2>/dev/null || true
+
       - name: Push Docker image
         run: |
           docker push "${IMAGE}:${BRANCH_TAG}"
