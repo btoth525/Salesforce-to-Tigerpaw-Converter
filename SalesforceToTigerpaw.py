@@ -25,13 +25,13 @@ def detect_encoding(input_stream):
     return result['encoding'] or 'utf-8'
 
 def parse_csv(input_stream, encoding):
-    """Try parsing CSV with common delimiters."""
+    """Try parsing CSV with common delimiters. Requires at least 2 columns to avoid false positives."""
     delimiters = [',', ';', '\t']
     for delim in delimiters:
         input_stream.seek(0)
         try:
             df = pd.read_csv(input_stream, encoding=encoding, delimiter=delim, skip_blank_lines=True)
-            if not df.empty:
+            if not df.empty and len(df.columns) > 1:
                 return df
         except pd.errors.ParserError:
             continue
@@ -48,7 +48,12 @@ def transform_salesforce_df(df):
     }
     missing_cols = [col for col in column_mapping if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"Missing expected columns in CSV: {', '.join(missing_cols)}")
+        detected = list(df.columns[:8])
+        suffix = " …" if len(df.columns) > 8 else ""
+        raise ValueError(
+            f"Missing required columns: {', '.join(missing_cols)}. "
+            f"Columns found in your file: {', '.join(detected)}{suffix}"
+        )
     df = df.rename(columns=column_mapping)
     # Drop unnecessary columns
     df = df.drop(columns=[col for col in ["Total Price"] if col in df.columns], errors='ignore')
@@ -123,9 +128,12 @@ def upload_file_route():
                 'Access-Control-Expose-Headers': 'X-Row-Count',
             }
         )
-    except (ValueError, Exception) as e:
+    except ValueError as e:
         logger.warning("Conversion error for file %s: %s", filename, str(e))
-        return jsonify({"error": f"Error processing file: {str(e)}"}), 400
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Unexpected error for file %s: %s", filename, str(e))
+        return jsonify({"error": "An unexpected error occurred. Please try again."}), 500
 
 
 @app.route('/', defaults={'path': ''})
@@ -135,6 +143,19 @@ def serve_react(path):
     if path != "" and os.path.exists(os.path.join(REACT_BUILD_DIR, path)):
         return send_from_directory(REACT_BUILD_DIR, path)
     return send_from_directory(REACT_BUILD_DIR, 'index.html')
+
+
+@app.route('/health')
+def health():
+    """Health check endpoint for container orchestration."""
+    return jsonify({"status": "ok", "version": "1.1.0"}), 200
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    return response
 
 
 @app.errorhandler(413)

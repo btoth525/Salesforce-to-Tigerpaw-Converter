@@ -64,6 +64,33 @@ class FlaskAppTestCase(unittest.TestCase):
         response = self.client.post('/', data=data, content_type='multipart/form-data')
         self.assertEqual(response.status_code, 413)
 
+    def test_valid_csv_returns_row_count_header(self):
+        data = {'file': (io.BytesIO(VALID_CSV.encode('utf-8')), 'test.csv')}
+        response = self.client.post('/', data=data, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get('X-Row-Count'), '1')
+
+    def test_semicolon_delimited_csv(self):
+        semi_csv = "Product Code;Description;Quantity;Net Unit Price;Unit Cost\nABC123;Test Widget;2;49.99;30.00\n"
+        data = {'file': (io.BytesIO(semi_csv.encode('utf-8')), 'semi.csv')}
+        response = self.client.post('/', data=data, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Part Number', response.data)
+
+    def test_missing_columns_error_shows_detected_columns(self):
+        bad_csv = "Wrong Column,Another Wrong Column\nfoo,bar\n"
+        data = {'file': (io.BytesIO(bad_csv.encode('utf-8')), 'bad.csv')}
+        response = self.client.post('/', data=data, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 400)
+        json_data = response.get_json()
+        self.assertIn('Columns found in your file', json_data['error'])
+
+    def test_health_endpoint(self):
+        response = self.client.get('/health')
+        self.assertEqual(response.status_code, 200)
+        json_data = response.get_json()
+        self.assertEqual(json_data['status'], 'ok')
+
 
 if __name__ == '__main__':
     unittest.main()

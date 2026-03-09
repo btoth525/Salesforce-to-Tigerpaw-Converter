@@ -97,6 +97,17 @@ function App() {
 
   const handleFileChange = e => applyFile(e.target.files[0] || null);
 
+  const triggerDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   const handleUpload = async e => {
     e.preventDefault();
     const file = selectedFile || fileInput.current?.files[0];
@@ -112,8 +123,13 @@ function App() {
     const formData = new FormData();
     formData.append('file', file);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     try {
-      const response = await fetch('/', { method: 'POST', body: formData });
+      const response = await fetch('/', { method: 'POST', body: formData, signal: controller.signal });
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         setMsg(errData.error || 'Conversion failed. Please try again.', 'error');
@@ -122,18 +138,11 @@ function App() {
 
       const rows = parseInt(response.headers.get('X-Row-Count') || '0', 10);
       const blob = await response.blob();
-      setLastBlob(blob);
+      const outName = file.name.replace(/\.csv$/i, '_converted.csv');
+      setLastBlob({ blob, filename: outName });
       if (rows > 0) setRowsConverted(rows);
 
-      // Trigger download
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name.replace(/\.csv$/i, '_converted.csv');
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      triggerDownload(blob, outName);
 
       setMsg(
         rows > 0
@@ -143,17 +152,27 @@ function App() {
       );
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 2500);
-    } catch {
-      setMsg('Network error — please check your connection and try again.', 'error');
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        setMsg('Conversion timed out — the server is taking too long. Try a smaller file or try again.', 'error');
+      } else {
+        setMsg('Network error — please check your connection and try again.', 'error');
+      }
     } finally {
       setConverting(false);
     }
   };
 
+  const handleRedownload = () => {
+    if (!lastBlob) return;
+    triggerDownload(lastBlob.blob, lastBlob.filename);
+  };
+
   const handleCopyCSV = async () => {
     if (!lastBlob) return;
     try {
-      const text = await lastBlob.text();
+      const text = await lastBlob.blob.text();
       await navigator.clipboard.writeText(text);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
@@ -281,8 +300,11 @@ function App() {
       {/* Post-conversion actions */}
       {lastBlob && (
         <div className="post-actions">
+          <button className="copy-btn" onClick={handleRedownload}>
+            ⬇️ Re-download
+          </button>
           <button className="copy-btn" onClick={handleCopyCSV}>
-            {copySuccess ? '✅ Copied to clipboard!' : '📋 Copy CSV to Clipboard'}
+            {copySuccess ? '✅ Copied!' : '📋 Copy to Clipboard'}
           </button>
           {rowsConverted !== null && (
             <div className="stat-badge">
