@@ -11,9 +11,10 @@ import logging
 REACT_BUILD_DIR = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
 app = Flask(__name__, static_folder=REACT_BUILD_DIR, static_url_path="/")
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'PLEASE_CHANGE_ME_SECRET_KEY')
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB upload limit
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-app.logger = logging.getLogger("SalesforceToTigerpaw")
+logger = logging.getLogger("SalesforceToTigerpaw")
 
 
 def detect_encoding(input_stream):
@@ -74,10 +75,9 @@ def process_file(input_stream):
         if df is None or df.empty:
             raise ValueError("The uploaded CSV file is empty or could not be parsed.")
         transformed_df = transform_salesforce_df(df)
+        # Write with Windows line endings; BOM added by encode('utf-8-sig') for Excel/Tigerpaw compatibility
         output_stream = io.StringIO()
-        # Write with Windows line endings and BOM for Excel/Tigerpaw compatibility
-        transformed_df.to_csv(output_stream, index=False, encoding='utf-8-sig', lineterminator='\r\n')
-        output_stream.seek(0)
+        transformed_df.to_csv(output_stream, index=False, lineterminator='\r\n')
         binary_stream = io.BytesIO(output_stream.getvalue().encode('utf-8-sig'))
         binary_stream.seek(0)
         return binary_stream
@@ -85,16 +85,17 @@ def process_file(input_stream):
         raise ValueError("The uploaded CSV file is empty or could not be parsed.")
     except pd.errors.ParserError as e:
         raise ValueError(f"Invalid CSV format: {str(e)}")
-    except ValueError as e:
+    except ValueError:
         raise
     except Exception as e:
         raise Exception(f"An unexpected error occurred: {str(e)}")
 
+
 # --- Flask Routes ---
 
-# API endpoint for file upload/conversion
 @app.route('/', methods=['POST'])
 def upload_file_route():
+    """Handle CSV file upload and return converted Tigerpaw CSV."""
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request."}), 400
     file = request.files['file']
@@ -107,6 +108,7 @@ def upload_file_route():
     output_filename = os.path.splitext(filename)[0] + "_converted.csv"
     try:
         binary_stream = process_file(file.stream)
+        logger.info("Successfully converted file: %s", filename)
         return Response(
             binary_stream.getvalue(),
             mimetype='text/csv',
@@ -119,22 +121,30 @@ def upload_file_route():
             }
         )
     except (ValueError, Exception) as e:
+        logger.warning("Conversion error for file %s: %s", filename, str(e))
         return jsonify({"error": f"Error processing file: {str(e)}"}), 400
 
-# Serve React static files
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_react(path):
+    """Serve the React frontend for all non-API GET routes."""
     if path != "" and os.path.exists(os.path.join(REACT_BUILD_DIR, path)):
         return send_from_directory(REACT_BUILD_DIR, path)
-    else:
-        return send_from_directory(REACT_BUILD_DIR, 'index.html')
+    return send_from_directory(REACT_BUILD_DIR, 'index.html')
+
+
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    return jsonify({"error": "File is too large. Maximum allowed size is 10 MB."}), 413
+
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.error(f"Unhandled Exception: {e}")
-    return "An error occurred. Please try again later.", 500
+    logger.error("Unhandled Exception: %s", e)
+    return jsonify({"error": "An internal error occurred. Please try again later."}), 500
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5023)
+    port = int(os.environ.get('PORT', 5023))
+    app.run(host='0.0.0.0', port=port)

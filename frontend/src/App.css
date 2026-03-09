@@ -42,7 +42,7 @@ body::before {
   border-radius: 24px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   padding: 3rem 2.5rem 2.5rem 2.5rem;
-  max-width: 480px;
+  max-width: 500px;
   width: 100%;
   text-align: center;
   animation: fadeIn 1.2s cubic-bezier(0.23, 1, 0.32, 1), floaty 6s ease-in-out infinite;
@@ -79,6 +79,7 @@ h1 {
   100% { background-position: 100% 50%; }
 }
 
+/* ---- Upload form ---- */
 .upload-form {
   display: flex;
   flex-direction: column;
@@ -87,22 +88,62 @@ h1 {
   animation: fadeIn 1.5s 0.2s backwards;
 }
 
-.upload-form input[type="file"] {
-  padding: 0.7rem 1rem;
-  border-radius: 12px;
-  border: 1.5px solid #aee2ff;
-  background: rgba(255,255,255,0.18);
-  color: #222;
+/* ---- Drag-and-drop zone ---- */
+.drop-zone {
+  padding: 1.6rem 1rem;
+  border-radius: 14px;
+  border: 2px dashed #aee2ff;
+  background: rgba(255,255,255,0.10);
+  color: #e0eaff;
   font-size: 1rem;
   cursor: pointer;
-  transition: border 0.2s, box-shadow 0.2s;
-  box-shadow: 0 1px 8px 0 rgba(174,226,255,0.08);
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  outline: none;
 }
-.upload-form input[type="file"]:hover {
-  border: 1.5px solid #fff;
+.drop-zone:hover,
+.drop-zone:focus {
+  border-color: #fff;
+  background: rgba(255,255,255,0.16);
   box-shadow: 0 2px 16px 0 rgba(174,226,255,0.18);
 }
+.drop-zone--active {
+  border-color: #fff;
+  background: rgba(174,226,255,0.18);
+  box-shadow: 0 4px 24px 0 rgba(174,226,255,0.28);
+}
+.drop-zone--has-file {
+  border-style: solid;
+  border-color: #aee2ff;
+  background: rgba(174,226,255,0.12);
+}
+.drop-zone__icon {
+  font-size: 2rem;
+  line-height: 1;
+}
+.drop-zone__filename {
+  font-weight: 700;
+  color: #fff;
+  word-break: break-all;
+}
+.drop-zone__size {
+  font-size: 0.88rem;
+  color: #aee2ff;
+}
+.drop-zone__hint {
+  color: #e0eaff;
+  font-size: 0.97rem;
+}
+.drop-zone__sub {
+  font-size: 0.82rem;
+  color: #aee2ff;
+  opacity: 0.8;
+}
 
+/* ---- Convert button ---- */
 .upload-form button {
   padding: 0.9rem 0;
   border-radius: 12px;
@@ -117,6 +158,10 @@ h1 {
   transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
   position: relative;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
 }
 .upload-form button:before {
   content: "";
@@ -142,51 +187,56 @@ h1 {
   transform: scale(0.97);
 }
 .upload-form button:disabled {
-  background: #b0b0b0;
+  background: #6a7fa8;
   cursor: not-allowed;
+  transform: none;
 }
 
+/* ---- Spinner ---- */
+.spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2.5px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- Status messages ---- */
 .status {
   margin-bottom: 1rem;
-  padding: 0.7rem 1rem;
+  padding: 0.75rem 1rem;
   border-radius: 10px;
+  font-weight: 600;
+  font-size: 1.02rem;
+  animation: fadeIn 0.4s ease;
+}
+.status--info {
   background: rgba(174,226,255,0.18);
   color: #fff;
-  font-weight: 600;
-  font-size: 1.05rem;
   box-shadow: 0 1px 6px 0 rgba(174,226,255,0.08);
-  animation: fadeIn 1.2s 0.3s backwards;
+}
+.status--success {
+  background: rgba(60, 200, 120, 0.22);
+  color: #c6ffdd;
+  border: 1px solid rgba(60, 200, 120, 0.35);
+}
+.status--error {
+  background: rgba(255, 80, 80, 0.18);
+  color: #ffd0d0;
+  border: 1px solid rgba(255, 80, 80, 0.35);
 }
 
-.instructions {
-  margin-top: 1.2rem;
-  font-size: 1.05rem;
-  color: #e0eaff;
-  background: rgba(30,60,114,0.12);
-  border-radius: 10px;
-  padding: 1rem 0.7rem;
-  box-shadow: 0 1px 6px 0 rgba(30,60,114,0.08);
-  animation: fadeIn 1.2s 0.5s backwards;
-}
-
-.floating-icon {
-  width: 130px;
-  height: 130px;
-  margin-bottom: 1.5rem;
-  animation: floatIcon 3.5s ease-in-out infinite;
-  filter: drop-shadow(0 4px 48px #aee2ffcc);
-}
-
-@keyframes floatIcon {
-  0%, 100% { transform: translateY(0) scale(1.08); }
-  50% { transform: translateY(-18px) scale(1.18); }
-}
-
+/* ---- Contact button ---- */
 .contact-btn {
   display: inline-block;
   margin-top: 1.7rem;
   padding: 0.85rem 2.2rem;
-  font-size: 1.13rem;
+  font-size: 1.08rem;
   font-weight: 700;
   color: #fff;
   background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%);
@@ -221,72 +271,20 @@ h1 {
   transform: scale(1.04);
 }
 
-.toggle-btn {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  background: rgba(255,255,255,0.7);
-  border: none;
-  border-radius: 50%;
-  font-size: 1.5rem;
-  width: 2.5rem;
-  height: 2.5rem;
-  cursor: pointer;
-  box-shadow: 0 2px 8px 0 #1e3c7222;
-  transition: background 0.2s, transform 0.1s;
-  z-index: 10;
+/* ---- Floating icon ---- */
+.floating-icon {
+  width: 130px;
+  height: 130px;
+  margin-bottom: 1.5rem;
+  animation: floatIcon 3.5s ease-in-out infinite;
+  filter: drop-shadow(0 4px 48px #aee2ffcc);
 }
-.toggle-btn:hover {
-  background: #aee2ff;
-  transform: scale(1.08);
+@keyframes floatIcon {
+  0%, 100% { transform: translateY(0) scale(1.08); }
+  50% { transform: translateY(-18px) scale(1.18); }
 }
 
-.container.dark {
-  background: rgba(30, 36, 50, 0.92);
-  color: #fff;
-}
-.container.dark h1 {
-  background: linear-gradient(90deg, #fff 40%, #aee2ff 100%);
-  -webkit-text-fill-color: transparent;
-}
-.container.dark .instructions {
-  color: #e0eaff;
-  background: rgba(30,60,114,0.12);
-}
-.container.dark .status {
-  color: #fff;
-  background: rgba(174,226,255,0.18);
-}
-
-.party-btn {
-  background: linear-gradient(90deg, #ffb300 0%, #aee2ff 100%);
-  color: #1e3c72;
-  border: none;
-  border-radius: 16px;
-  font-size: 1.1rem;
-  font-weight: 700;
-  padding: 0.7rem 1.5rem;
-  box-shadow: 0 2px 12px 0 #1e3c7244;
-  cursor: pointer;
-  letter-spacing: 0.04em;
-  transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
-  z-index: 20;
-}
-.party-btn:hover {
-  background: linear-gradient(90deg, #aee2ff 0%, #ffb300 100%);
-  transform: scale(1.07) rotate(-2deg);
-  box-shadow: 0 4px 24px 0 #ffb30055;
-}
-
-@keyframes mascotParty {
-  0% { transform: scale(1) rotate(-10deg); }
-  100% { transform: scale(1.2) rotate(10deg); }
-}
-@keyframes mascotBubble {
-  0% { transform: scale(0.7); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
-}
-
+/* ---- Confetti ---- */
 @keyframes fadeConfetti {
   0% { opacity: 0; transform: scale(0.7); }
   10% { opacity: 1; transform: scale(1.1); }
@@ -294,16 +292,17 @@ h1 {
   100% { opacity: 0; transform: scale(0.7); }
 }
 
+/* ---- Mobile ---- */
 @media (max-width: 600px) {
   .container {
-    padding: 2rem 0.7rem 1.5rem 0.7rem;
+    padding: 2rem 0.9rem 1.5rem 0.9rem;
     max-width: 98vw;
   }
   h1 {
-    font-size: 1.3rem;
+    font-size: 1.4rem;
   }
   .floating-icon {
-    width: 40px;
-    height: 40px;
+    width: 60px;
+    height: 60px;
   }
 }
