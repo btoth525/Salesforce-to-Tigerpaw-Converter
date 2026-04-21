@@ -15,6 +15,7 @@
     </div>
     <div class="admin-nav-actions">
       <a class="nav-btn" href="/" title="Back to app">← App</a>
+      <a class="nav-btn" href="/admin/api/export" title="Export all events as CSV">Export CSV</a>
       <button class="nav-btn danger" id="btn-reset" title="Delete all telemetry">Reset data</button>
       <form method="post" action="{{ url_for('admin_logout') }}">
         <button class="nav-btn" type="submit">Log out</button>
@@ -65,8 +66,8 @@
       <div class="card-title"><span>Users</span><span class="hint">click a row to see their history</span></div>
       <div class="scroll-250">
         <table class="tbl">
-          <thead><tr><th></th><th>Name</th><th>Events</th><th>Last seen</th><th>First seen</th><th>Device</th><th>IP</th></tr></thead>
-          <tbody id="users-tbody"><tr><td class="empty" colspan="7">Loading…</td></tr></tbody>
+          <thead><tr><th></th><th>Name</th><th>Events</th><th>Last seen</th><th>First seen</th><th>Device</th><th>IP</th><th></th></tr></thead>
+          <tbody id="users-tbody"><tr><td class="empty" colspan="8">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -145,12 +146,15 @@
         } else {
           detail = escapeHtml(JSON.stringify(d));
         }
+        const geoBit = e.geo && (e.geo.city || e.geo.country)
+          ? ` · ${escapeHtml([e.geo.city, e.geo.region, e.geo.country].filter(Boolean).join(', '))}`
+          : '';
         return `
           <div class="event-row">
             <span class="event-pill" data-type="${escapeHtml(e.type)}">${escapeHtml(e.type)}</span>
             <div>
               <strong>${escapeHtml(e.userName)}</strong> · <span class="event-details">${detail}</span>
-              <div class="event-meta">${escapeHtml(e.browser)} on ${escapeHtml(e.os)} · ${escapeHtml(e.ip || '')}</div>
+              <div class="event-meta">${escapeHtml(e.browser)} on ${escapeHtml(e.os)} · ${escapeHtml(e.ip || '')}${geoBit}</div>
             </div>
             <span class="event-meta" title="${escapeHtml(fmtAbs(e.createdAt))}">${fmtRel(e.createdAt)}</span>
           </div>`;
@@ -160,11 +164,11 @@
     function renderUsers(users) {
       const tbody = document.getElementById('users-tbody');
       if (!users.length) {
-        tbody.innerHTML = `<tr><td class="empty" colspan="7">No users yet.</td></tr>`;
+        tbody.innerHTML = `<tr><td class="empty" colspan="8">No users yet.</td></tr>`;
         return;
       }
       tbody.innerHTML = users.map((u) => `
-        <tr class="clickable" data-user-id="${u.id}">
+        <tr class="clickable" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}">
           <td><span class="badge-dot ${u.active ? 'active' : ''}"></span></td>
           <td>${escapeHtml(u.name)}</td>
           <td>${u.eventCount}</td>
@@ -172,9 +176,27 @@
           <td class="small muted" title="${escapeHtml(fmtAbs(u.firstSeen))}">${fmtRel(u.firstSeen)}</td>
           <td class="small muted">${escapeHtml(u.device)} · ${escapeHtml(u.browser)} · ${escapeHtml(u.os)}</td>
           <td class="small muted">${escapeHtml(u.lastIp || '')}</td>
+          <td><button class="nav-btn danger small" data-delete-user="${u.id}" data-name="${escapeHtml(u.name)}" title="Delete this user + their events">✕</button></td>
         </tr>`).join('');
-      tbody.querySelectorAll('[data-user-id]').forEach((row) => {
-        row.addEventListener('click', () => showUserModal(row.dataset.userId));
+      tbody.querySelectorAll('tr.clickable').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('[data-delete-user]')) return;
+          showUserModal(row.dataset.userId);
+        });
+      });
+      tbody.querySelectorAll('[data-delete-user]').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.deleteUser;
+          const name = btn.dataset.name;
+          if (!confirm(`Delete ${name} and all their events?`)) return;
+          try {
+            await fetchJSON(`/admin/api/user/${id}/delete`, { method: 'POST' });
+            refresh();
+          } catch (err) {
+            alert(`Delete failed: ${err.message}`);
+          }
+        });
       });
     }
 
