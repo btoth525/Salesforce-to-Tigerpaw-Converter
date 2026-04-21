@@ -119,6 +119,7 @@ function openFilePicker(onFiles) {
 // every request. Backend uses it to track who did what.
 
 const USER_KEY = 'csv-forge-user';
+const RESET_KEY = 'csv-forge-reset-at';
 
 function getUserName() {
   try { return localStorage.getItem(USER_KEY) || ''; } catch { return ''; }
@@ -129,6 +130,13 @@ function setUserName(name) {
     if (name) localStorage.setItem(USER_KEY, name);
     else localStorage.removeItem(USER_KEY);
   } catch { /* ignore quota / private mode */ }
+}
+
+function getStoredResetAt() {
+  try { return localStorage.getItem(RESET_KEY) || ''; } catch { return ''; }
+}
+function setStoredResetAt(v) {
+  try { if (v) localStorage.setItem(RESET_KEY, v); } catch { /* ignore */ }
 }
 
 async function apiFetch(url, opts = {}) {
@@ -162,6 +170,40 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  // Watch for an admin-initiated full reset. The server bumps `resetAt` in
+  // /api/public-stats when an admin clicks "Reset data"; when we see a newer
+  // timestamp than we've recorded, we clear local identity and force the
+  // name modal. Runs on mount and every 30s while the tab is open.
+  useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      try {
+        const res = await fetch('/api/public-stats');
+        if (!res.ok || !alive) return;
+        const data = await res.json();
+        const serverResetAt = data.resetAt || '';
+        if (!serverResetAt) return;
+        const stored = getStoredResetAt();
+        if (!stored) {
+          // First visit — just record the baseline so future bumps trigger.
+          setStoredResetAt(serverResetAt);
+          return;
+        }
+        if (serverResetAt > stored) {
+          setStoredResetAt(serverResetAt);
+          setUserName('');
+          setUserNameState('');
+          sessionStorage.removeItem('csv-forge-identified');
+          setShowNamePrompt(true);
+          pushToast('info', 'Admin reset all data — please enter your name again.');
+        }
+      } catch { /* network blip — try again next tick */ }
+    };
+    check();
+    const t = setInterval(check, 30000);
+    return () => { alive = false; clearInterval(t); };
+  }, [pushToast]);
 
   // Identify the user with the server — validates the name and records
   // the first-visit event. Errors keep the modal open.

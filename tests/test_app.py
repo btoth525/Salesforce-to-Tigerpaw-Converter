@@ -357,6 +357,36 @@ class IdentifyAndAdminTests(unittest.TestCase):
         self.assertEqual(stats["totalUsers"], 0)
         self.assertEqual(stats["totalEvents"], 0)
 
+    def test_reset_wipes_notes_and_feedback_and_bumps_token(self):
+        # Seed across every persistence surface so we can verify each is
+        # wiped — this is the bug the user reported: reset was only hitting
+        # users + events, leaving notes, feedback, and ip_geo behind.
+        self.client.post(
+            "/api/notes", json={"text": "pre-reset note"},
+            headers={"X-User-Name": "Seed"},
+        )
+        self.client.post(
+            "/api/feedback", json={"kind": "suggestion", "text": "pre-reset idea"},
+            headers={"X-User-Name": "Seed"},
+        )
+        # Capture the resetAt baseline before wiping.
+        before = self.client.get("/api/public-stats").get_json().get("resetAt", "")
+
+        self._login()
+        r = self.client.post("/admin/api/reset")
+        self.assertEqual(r.status_code, 200)
+
+        notes = self.client.get("/api/notes").get_json()["notes"]
+        self.assertEqual(notes, [])
+
+        fb = self.client.get("/admin/api/feedback?status=all").get_json()
+        self.assertEqual(fb["items"], [])
+        self.assertEqual(fb["openCount"], 0)
+
+        after = self.client.get("/api/public-stats").get_json().get("resetAt", "")
+        self.assertNotEqual(before, after)
+        self.assertGreater(after, before)
+
 
 class PublicStatsAndNotesTests(unittest.TestCase):
     def setUp(self):
