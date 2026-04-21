@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
-const STAGES = { IDLE: 'idle', LOADING: 'loading', PREVIEW: 'preview', DONE: 'done' };
+const STAGES = { IDLE: 'idle', LOADING: 'loading', PREVIEW: 'preview', BATCH: 'batch', DONE: 'done' };
 
 function App() {
   const [stage, setStage] = useState(STAGES.IDLE);
   const [error, setError] = useState('');
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [batchFiles, setBatchFiles] = useState([]);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
   const [tab, setTab] = useState('converted');
   const [query, setQuery] = useState('');
@@ -23,6 +24,7 @@ function App() {
     setStage(STAGES.IDLE);
     setFile(null);
     setPreview(null);
+    setBatchFiles([]);
     setError('');
     setQuery('');
   }, []);
@@ -50,6 +52,23 @@ function App() {
     }
   }, []);
 
+  // Entry point from drop / picker / paste — branches single vs batch.
+  const handleFiles = useCallback((fileList) => {
+    const arr = Array.from(fileList || []).filter((f) => f && f.name);
+    if (arr.length === 0) return;
+    const csvs = arr.filter((f) => f.name.toLowerCase().endsWith('.csv'));
+    if (csvs.length === 0) {
+      setError('Only .csv files are supported.');
+      return;
+    }
+    if (csvs.length === 1) {
+      loadPreview(csvs[0]);
+    } else {
+      setBatchFiles(csvs);
+      setStage(STAGES.BATCH);
+    }
+  }, [loadPreview]);
+
   const doConvert = useCallback(async () => {
     if (!file) return;
     setError('');
@@ -62,14 +81,7 @@ function App() {
         throw new Error(body.error || 'Conversion failed.');
       }
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name.replace(/\.csv$/i, '_converted.csv');
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      triggerDownload(blob, file.name.replace(/\.csv$/i, '_converted.csv'));
       setStage(STAGES.DONE);
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 2400);
@@ -77,6 +89,55 @@ function App() {
       setError(e.message);
     }
   }, [file]);
+
+  // Apply user edits by POSTing the already-transformed JSON to the backend.
+  const doConvertEdited = useCallback(async (editedRows) => {
+    if (!file || !preview) return;
+    setError('');
+    try {
+      const res = await fetch('/api/convert-edited', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name.replace(/\.csv$/i, '_edited.csv'),
+          columns: preview.transformedColumns,
+          rows: editedRows,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Conversion failed.');
+      }
+      const blob = await res.blob();
+      triggerDownload(blob, file.name.replace(/\.csv$/i, '_edited.csv'));
+      setStage(STAGES.DONE);
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 2400);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [file, preview]);
+
+  const doConvertBatch = useCallback(async () => {
+    if (batchFiles.length === 0) return;
+    setError('');
+    try {
+      const fd = new FormData();
+      for (const f of batchFiles) fd.append('files', f);
+      const res = await fetch('/api/convert-batch', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Batch conversion failed.');
+      }
+      const blob = await res.blob();
+      triggerDownload(blob, 'converted_batch.zip');
+      setStage(STAGES.DONE);
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 2400);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [batchFiles]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -105,22 +166,23 @@ function App() {
     const onPaste = (e) => {
       if (stage !== STAGES.IDLE) return;
       const items = e.clipboardData?.items || [];
+      const files = [];
       for (const it of items) {
         if (it.kind === 'file') {
           const f = it.getAsFile();
-          if (f) { loadPreview(f); return; }
+          if (f) files.push(f);
         }
       }
+      if (files.length) { handleFiles(files); return; }
       const text = e.clipboardData?.getData('text');
       if (text && text.includes(',') && text.includes('\n')) {
         const blob = new Blob([text], { type: 'text/csv' });
-        const f = new File([blob], 'pasted.csv', { type: 'text/csv' });
-        loadPreview(f);
+        handleFiles([new File([blob], 'pasted.csv', { type: 'text/csv' })]);
       }
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [loadPreview, stage]);
+  }, [handleFiles, stage]);
 
   return (
     <div className="app" data-stage={stage}>
@@ -143,8 +205,21 @@ function App() {
         {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
 
         <div className="stage-wrap" key={stage}>
-          {stage === STAGES.IDLE && <DropZone onFile={loadPreview} />}
+          {stage === STAGES.IDLE && <DropZone onFiles={handleFiles} />}
           {stage === STAGES.LOADING && <Loading filename={file?.name} />}
+          {stage === STAGES.BATCH && (
+            <BatchPanel
+              files={batchFiles}
+              onConvert={doConvertBatch}
+              onReset={reset}
+              onRemove={(idx) => {
+                const next = batchFiles.filter((_, i) => i !== idx);
+                if (next.length === 0) reset();
+                else if (next.length === 1) loadPreview(next[0]);
+                else setBatchFiles(next);
+              }}
+            />
+          )}
           {stage === STAGES.PREVIEW && preview && (
             <PreviewPanel
               file={file}
@@ -154,10 +229,16 @@ function App() {
               query={query}
               setQuery={setQuery}
               onConvert={doConvert}
+              onConvertEdited={doConvertEdited}
               onReset={reset}
             />
           )}
-          {stage === STAGES.DONE && <SuccessCard filename={file?.name} onAgain={reset} />}
+          {stage === STAGES.DONE && (
+            <SuccessCard
+              filename={file?.name || (batchFiles.length ? `${batchFiles.length} files` : '')}
+              onAgain={reset}
+            />
+          )}
         </div>
       </main>
       <Footer />
@@ -196,15 +277,14 @@ function TopBar({ theme, onToggleTheme, onHelp }) {
   );
 }
 
-function DropZone({ onFile }) {
+function DropZone({ onFiles }) {
   const inputRef = useRef();
   const [over, setOver] = useState(false);
 
   const onDrop = (e) => {
     e.preventDefault();
     setOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) onFile(f);
+    if (e.dataTransfer.files?.length) onFiles(e.dataTransfer.files);
   };
 
   return (
@@ -220,17 +300,54 @@ function DropZone({ onFile }) {
     >
       <div className="dropzone-inner">
         <div className="dropzone-icon"><UploadIcon /></div>
-        <div className="dropzone-primary">Drop your Salesforce CSV here</div>
+        <div className="dropzone-primary">Drop your Salesforce CSV{'(s)'} here</div>
         <div className="dropzone-secondary">
-          click to browse, drag-and-drop, or <kbd>⌘/Ctrl</kbd>+<kbd>V</kbd> to paste &middot; max 10 MB
+          one file = preview &amp; edit · multiple files = batch convert → ZIP
+        </div>
+        <div className="dropzone-secondary dim">
+          click to browse, drag-and-drop, or <kbd>⌘/Ctrl</kbd>+<kbd>V</kbd> to paste &middot; max 10 MB each
         </div>
         <input
           ref={inputRef}
           type="file"
           accept=".csv,text/csv"
+          multiple
           hidden
-          onChange={(e) => onFile(e.target.files?.[0])}
+          onChange={(e) => onFiles(e.target.files)}
         />
+      </div>
+    </div>
+  );
+}
+
+function BatchPanel({ files, onConvert, onReset, onRemove }) {
+  const totalBytes = files.reduce((a, f) => a + f.size, 0);
+  return (
+    <div className="batch">
+      <div className="card batch-card">
+        <div className="card-title batch-title">
+          <span>Batch convert · {files.length} file{files.length === 1 ? '' : 's'}</span>
+          <span className="batch-total">{formatBytes(totalBytes)}</span>
+        </div>
+        <div className="batch-list">
+          {files.map((f, i) => (
+            <div className="batch-row" key={`${f.name}-${i}`}>
+              <FileIcon />
+              <span className="batch-name" title={f.name}>{f.name}</span>
+              <span className="batch-size">{formatBytes(f.size)}</span>
+              <button className="icon-btn sm" onClick={() => onRemove(i)} aria-label={`Remove ${f.name}`}>✕</button>
+            </div>
+          ))}
+        </div>
+        <div className="batch-footnote">
+          Each file is transformed independently. Files that can't be parsed are listed in <code>_errors.txt</code> inside the ZIP — successful conversions are still included.
+        </div>
+      </div>
+      <div className="actions">
+        <button className="btn ghost" onClick={onReset}>← Back</button>
+        <button className="btn primary glow" onClick={onConvert} title="⌘/Ctrl+Enter">
+          <DownloadIcon /> Convert All → Download ZIP
+        </button>
       </div>
     </div>
   );
@@ -248,21 +365,50 @@ function Loading({ filename }) {
   );
 }
 
-function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, onReset }) {
+function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
   const { rowCount, originalColumns, transformedColumns, originalPreview, transformedPreview,
-    mapping, addedColumns, droppedColumns } = preview;
+    mapping, addedColumns, droppedColumns, truncated } = preview;
 
   const fileSize = useMemo(() => formatBytes(file?.size ?? 0), [file]);
 
-  const activeRows = tab === 'converted' ? transformedPreview : originalPreview;
+  // Local editable copy of the converted rows. Reset whenever a new preview arrives.
+  const [editedRows, setEditedRows] = useState(() => transformedPreview.map((r) => ({ ...r })));
+  useEffect(() => { setEditedRows(transformedPreview.map((r) => ({ ...r }))); }, [transformedPreview]);
+
+  const dirty = useMemo(() => {
+    if (editedRows.length !== transformedPreview.length) return true;
+    for (let i = 0; i < editedRows.length; i++) {
+      const a = editedRows[i];
+      const b = transformedPreview[i];
+      for (const c of transformedColumns) {
+        if ((a?.[c] ?? '') !== (b?.[c] ?? '')) return true;
+      }
+    }
+    return false;
+  }, [editedRows, transformedPreview, transformedColumns]);
+
+  const setCell = useCallback((rowIdx, col, value) => {
+    setEditedRows((prev) => {
+      const next = prev.slice();
+      next[rowIdx] = { ...next[rowIdx], [col]: value };
+      return next;
+    });
+  }, []);
+
+  const revertEdits = useCallback(() => {
+    setEditedRows(transformedPreview.map((r) => ({ ...r })));
+  }, [transformedPreview]);
+
+  const activeRows = tab === 'converted' ? editedRows : originalPreview;
   const activeCols = tab === 'converted' ? transformedColumns : originalColumns;
+  const editable = tab === 'converted' && !truncated;
 
   const filteredRows = useMemo(() => {
-    if (!query) return activeRows;
+    if (!query) return activeRows.map((r, i) => ({ r, i }));
     const q = query.toLowerCase();
-    return activeRows.filter((r) =>
-      Object.values(r).some((v) => v != null && String(v).toLowerCase().includes(q))
-    );
+    return activeRows
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => Object.values(r).some((v) => v != null && String(v).toLowerCase().includes(q)));
   }, [activeRows, query]);
 
   // For converted-column tooltips: reverse-lookup the source column.
@@ -278,6 +424,7 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
         <FileIcon />
         <span className="file-chip-name">{file?.name}</span>
         <span className="file-chip-size">{fileSize}</span>
+        {dirty && <span className="dirty-dot" title="You have unsaved edits" />}
         <button className="file-chip-x" onClick={onReset} aria-label="Remove file">✕</button>
       </div>
 
@@ -304,6 +451,11 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
             Original <span className="chip">{originalColumns.length} cols</span>
           </button>
           <div className="tabs-spacer" />
+          {editable && (
+            <div className="edit-hint" title="Click any converted cell to edit it. Changes stay local until you download.">
+              <PencilIcon /> <span>Cells are editable</span>
+            </div>
+          )}
           <div className="search">
             <SearchIcon />
             <input
@@ -320,17 +472,35 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
           addedColumns={addedColumns}
           sourceFor={sourceFor}
           isConverted={tab === 'converted'}
+          editable={editable}
+          onCellChange={setCell}
         />
         <div className="table-footnote">
-          Showing {filteredRows.length} of {activeRows.length} preview rows{rowCount > activeRows.length ? ` (first ${activeRows.length} of ${rowCount})` : ''}.
+          Showing {filteredRows.length} of {activeRows.length} preview rows
+          {truncated ? ` — file has ${rowCount} rows, editing available for files ≤ 500 rows` :
+            (rowCount > activeRows.length ? ` (first ${activeRows.length} of ${rowCount})` : '')}.
         </div>
       </div>
 
       <div className="actions">
         <button className="btn ghost" onClick={onReset}>← Back</button>
-        <button className="btn primary glow" onClick={onConvert} title="⌘/Ctrl+Enter">
-          <DownloadIcon /> Convert &amp; Download
+        {dirty && (
+          <button className="btn ghost" onClick={revertEdits} title="Discard edits">
+            Revert edits
+          </button>
+        )}
+        <button
+          className={`btn ${dirty ? '' : 'primary glow'}`}
+          onClick={onConvert}
+          title="⌘/Ctrl+Enter"
+        >
+          <DownloadIcon /> Download as-is
         </button>
+        {dirty && (
+          <button className="btn primary glow" onClick={() => onConvertEdited(editedRows)}>
+            <DownloadIcon /> Download edited
+          </button>
+        )}
       </div>
     </div>
   );
@@ -384,7 +554,7 @@ function MappingGroup({ color, title, items }) {
   );
 }
 
-function DataTable({ columns, rows, addedColumns, sourceFor, isConverted }) {
+function DataTable({ columns, rows, addedColumns, sourceFor, isConverted, editable, onCellChange }) {
   if (rows.length === 0) {
     return <div className="table-empty">No rows match your filter.</div>;
   }
@@ -414,18 +584,75 @@ function DataTable({ columns, rows, addedColumns, sourceFor, isConverted }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
+          {rows.map(({ r, i }) => (
             <tr key={i}>
-              {columns.map((c) => {
-                const v = r[c];
-                const isEmpty = v === null || v === undefined || v === '';
-                return <td key={c} className={isEmpty ? 'empty' : ''}>{isEmpty ? '—' : String(v)}</td>;
-              })}
+              {columns.map((c) => (
+                <EditableCell
+                  key={c}
+                  value={r[c]}
+                  editable={editable}
+                  onChange={(v) => onCellChange?.(i, c, v)}
+                />
+              ))}
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function EditableCell({ value, editable, onChange }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const ref = useRef();
+
+  useEffect(() => {
+    if (editing && ref.current) {
+      ref.current.focus();
+      ref.current.select();
+    }
+  }, [editing]);
+
+  const start = () => {
+    if (!editable) return;
+    setDraft(value == null ? '' : String(value));
+    setEditing(true);
+  };
+  const commit = () => {
+    setEditing(false);
+    onChange(draft);
+  };
+  const cancel = () => {
+    setEditing(false);
+  };
+
+  const isEmpty = value === null || value === undefined || value === '';
+  if (editing) {
+    return (
+      <td className="cell editing">
+        <input
+          ref={ref}
+          className="cell-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+            if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+          }}
+        />
+      </td>
+    );
+  }
+  return (
+    <td
+      className={`cell ${isEmpty ? 'empty' : ''} ${editable ? 'editable' : ''}`}
+      onClick={start}
+      title={editable ? 'Click to edit' : undefined}
+    >
+      {isEmpty ? '—' : String(value)}
+    </td>
   );
 }
 
@@ -457,8 +684,8 @@ function HelpOverlay({ onClose }) {
     { keys: ['?'], desc: 'Show/hide this overlay' },
   ];
   const tips = [
-    'Drop-anywhere works — no need to aim at the zone.',
-    'Use the Filter box in the preview to search rows.',
+    'Drop multiple files at once for a batch → ZIP conversion.',
+    'Click any converted cell to edit before downloading.',
     'Added columns are green; renamed columns are purple.',
     'Theme preference is saved per browser.',
   ];
@@ -536,6 +763,17 @@ function Footer() {
   );
 }
 
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function formatBytes(n) {
   if (!n) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -601,6 +839,14 @@ function HelpIcon() {
       <circle cx="12" cy="12" r="10" />
       <path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 1-1 1.7" />
       <circle cx="12" cy="17" r="0.6" fill="currentColor" />
+    </svg>
+  );
+}
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
     </svg>
   );
 }
