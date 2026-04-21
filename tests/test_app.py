@@ -396,9 +396,12 @@ class PublicStatsAndNotesTests(unittest.TestCase):
         r = self.client.get("/api/public-stats")
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
-        for k in ("totalJobs", "jobsToday", "activeUsers", "topWeek"):
+        for k in ("totalJobs", "jobsToday", "activeUsers", "topAllTime", "resetAt"):
             self.assertIn(k, body)
-        self.assertIsInstance(body["topWeek"], list)
+        self.assertIsInstance(body["topAllTime"], list)
+        # Podium is capped at 3 — backend enforces this regardless of how
+        # many distinct users there are.
+        self.assertLessEqual(len(body["topAllTime"]), 3)
 
     def test_notes_roundtrip_requires_name(self):
         # Without X-User-Name the backend falls back to Guest which is rejected.
