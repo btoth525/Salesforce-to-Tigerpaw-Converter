@@ -63,6 +63,18 @@
     </div>
 
     <section class="card">
+      <div class="card-title">
+        <span>Feedback <span id="fb-badge" class="fb-badge" hidden>0</span></span>
+        <div class="fb-filter">
+          <button class="fb-chip active" data-fb-filter="open">Open</button>
+          <button class="fb-chip" data-fb-filter="resolved">Resolved</button>
+          <button class="fb-chip" data-fb-filter="all">All</button>
+        </div>
+      </div>
+      <div id="fb-list" class="fb-list"><div class="empty">Loading…</div></div>
+    </section>
+
+    <section class="card">
       <div class="card-title"><span>Users</span><span class="hint">click a row to see their history</span></div>
       <div class="scroll-250">
         <table class="tbl">
@@ -100,6 +112,31 @@
     }
     function escapeHtml(s) {
       return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // Turn a 2-letter ISO country code into its flag emoji (🇺🇸 etc).
+    // Each letter maps to a Regional Indicator Symbol codepoint; the two
+    // together render as a single flag glyph in browsers.
+    function flagFromCountryCode(cc) {
+      if (!cc || typeof cc !== 'string' || cc.length !== 2) return '';
+      const A = 0x1F1E6;  // Regional Indicator Symbol Letter A
+      const base = 'A'.charCodeAt(0);
+      return String.fromCodePoint(
+        A + (cc.toUpperCase().charCodeAt(0) - base),
+        A + (cc.toUpperCase().charCodeAt(1) - base),
+      );
+    }
+
+    // Render a pretty location badge: flag + pin + "City, Region, Country".
+    function renderGeoBadge(geo) {
+      if (!geo || (!geo.city && !geo.country)) return '';
+      const flag = flagFromCountryCode(geo.countryCode);
+      const where = [geo.city, geo.region, geo.country].filter(Boolean).join(', ');
+      return ` <span class="geo-badge" title="${escapeHtml(geo.isp || '')}">
+        ${flag ? `<span class="geo-flag" aria-hidden="true">${flag}</span>` : ''}
+        <svg class="geo-pin" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        <span>${escapeHtml(where)}</span>
+      </span>`;
     }
 
     function renderStats(data) {
@@ -146,9 +183,7 @@
         } else {
           detail = escapeHtml(JSON.stringify(d));
         }
-        const geoBit = e.geo && (e.geo.city || e.geo.country)
-          ? ` · ${escapeHtml([e.geo.city, e.geo.region, e.geo.country].filter(Boolean).join(', '))}`
-          : '';
+        const geoBit = renderGeoBadge(e.geo);
         return `
           <div class="event-row">
             <span class="event-pill" data-type="${escapeHtml(e.type)}">${escapeHtml(e.type)}</span>
@@ -243,6 +278,57 @@
       }
     }
 
+    let fbFilter = 'open';
+    async function refreshFeedback() {
+      try {
+        const data = await fetchJSON(`/admin/api/feedback?status=${encodeURIComponent(fbFilter)}`);
+        const badge = document.getElementById('fb-badge');
+        if (data.openCount > 0) { badge.hidden = false; badge.textContent = data.openCount; }
+        else { badge.hidden = true; }
+        renderFeedback(data.items);
+      } catch (err) { console.error('feedback refresh failed', err); }
+    }
+    function renderFeedback(items) {
+      const el = document.getElementById('fb-list');
+      if (!items.length) { el.innerHTML = `<div class="empty">No ${fbFilter === 'all' ? '' : fbFilter + ' '}feedback yet.</div>`; return; }
+      el.innerHTML = items.map((f) => `
+        <div class="fb-item" data-status="${escapeHtml(f.status)}">
+          <div class="fb-meta">
+            <span class="fb-kind fb-kind-${escapeHtml(f.kind)}">${f.kind === 'issue' ? '🐛' : '💡'} ${escapeHtml(f.kind)}</span>
+            <span class="fb-user">${escapeHtml(f.userName)}</span>
+            <span class="fb-time" title="${escapeHtml(fmtAbs(f.createdAt))}">${fmtRel(f.createdAt)}</span>
+            ${f.status === 'resolved' ? `<span class="fb-resolved">✓ resolved</span>` : ''}
+          </div>
+          <div class="fb-text">${escapeHtml(f.text)}</div>
+          <div class="fb-actions">
+            ${f.status === 'open'
+              ? `<button class="nav-btn small" data-fb-resolve="${f.id}">Mark resolved</button>`
+              : `<button class="nav-btn small" data-fb-reopen="${f.id}">Reopen</button>`}
+            <button class="nav-btn danger small" data-fb-delete="${f.id}">Delete</button>
+          </div>
+        </div>`).join('');
+      el.querySelectorAll('[data-fb-resolve]').forEach((b) => b.addEventListener('click', async () => {
+        await fetchJSON(`/admin/api/feedback/${b.dataset.fbResolve}/resolve`, { method: 'POST' });
+        refreshFeedback();
+      }));
+      el.querySelectorAll('[data-fb-reopen]').forEach((b) => b.addEventListener('click', async () => {
+        await fetchJSON(`/admin/api/feedback/${b.dataset.fbReopen}/reopen`, { method: 'POST' });
+        refreshFeedback();
+      }));
+      el.querySelectorAll('[data-fb-delete]').forEach((b) => b.addEventListener('click', async () => {
+        if (!confirm('Delete this feedback entry permanently?')) return;
+        await fetch(`/admin/api/feedback/${b.dataset.fbDelete}`, { method: 'DELETE' });
+        refreshFeedback();
+      }));
+    }
+    document.querySelectorAll('[data-fb-filter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-fb-filter]').forEach((b) => b.classList.toggle('active', b === btn));
+        fbFilter = btn.dataset.fbFilter;
+        refreshFeedback();
+      });
+    });
+
     async function refresh() {
       try {
         const [stats, events, users] = await Promise.all([
@@ -253,6 +339,7 @@
         renderStats(stats);
         renderEvents(events.events);
         renderUsers(users.users);
+        refreshFeedback();
       } catch (err) {
         console.error('refresh failed', err);
         if (err.message && err.message.includes('401')) {
