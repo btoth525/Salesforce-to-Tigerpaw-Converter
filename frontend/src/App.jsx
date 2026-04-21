@@ -3,9 +3,52 @@ import './App.css';
 
 const STAGES = { IDLE: 'idle', LOADING: 'loading', PREVIEW: 'preview', BATCH: 'batch', DONE: 'done' };
 
+// --- Toast system (lifted here to avoid a provider; single user of the app) -
+let toastId = 0;
+
+function useToasts() {
+  const [toasts, setToasts] = useState([]);
+  const push = useCallback((type, message, timeout = 4200) => {
+    const id = ++toastId;
+    setToasts((t) => [...t, { id, type, message }]);
+    if (timeout) setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), timeout);
+  }, []);
+  const dismiss = useCallback((id) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  return { toasts, push, dismiss };
+}
+
+// --- Count-up hook for the stat cards ---------------------------------------
+function useCountUp(target, duration = 650) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (typeof target !== 'number') { setValue(target); return; }
+    if (target === 0) { setValue(0); return; }
+    const start = performance.now();
+    let raf;
+    const tick = (t) => {
+      const elapsed = Math.min(1, (t - start) / duration);
+      const eased = 1 - Math.pow(1 - elapsed, 3);  // easeOutCubic
+      setValue(Math.round(target * eased));
+      if (elapsed < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return value;
+}
+
+// --- Programmatically open a file picker (used by the command palette) ------
+function openFilePicker(onFiles) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.csv,text/csv';
+  input.multiple = true;
+  input.onchange = (e) => onFiles(e.target.files);
+  input.click();
+}
+
 function App() {
   const [stage, setStage] = useState(STAGES.IDLE);
-  const [error, setError] = useState('');
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [batchFiles, setBatchFiles] = useState([]);
@@ -14,6 +57,10 @@ function App() {
   const [query, setQuery] = useState('');
   const [showConfetti, setShowConfetti] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showCmd, setShowCmd] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [editedRows, setEditedRows] = useState(null);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -25,15 +72,14 @@ function App() {
     setFile(null);
     setPreview(null);
     setBatchFiles([]);
-    setError('');
     setQuery('');
+    setEditedRows(null);
   }, []);
 
   const loadPreview = useCallback(async (f) => {
-    setError('');
     if (!f) return;
     if (!f.name.toLowerCase().endsWith('.csv')) {
-      setError('Only .csv files are supported.');
+      pushToast('error', 'Only .csv files are supported.');
       return;
     }
     setFile(f);
@@ -45,12 +91,16 @@ function App() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || 'Preview failed.');
       setPreview(body);
+      setEditedRows(body.transformedPreview.map((r) => ({ ...r })));
       setStage(STAGES.PREVIEW);
+      if (body.truncated) {
+        pushToast('warn', `Large file — editing disabled (${body.rowCount.toLocaleString()} rows > preview cap).`);
+      }
     } catch (e) {
-      setError(e.message);
+      pushToast('error', e.message);
       setStage(STAGES.IDLE);
     }
-  }, []);
+  }, [pushToast]);
 
   // Entry point from drop / picker / paste — branches single vs batch.
   const handleFiles = useCallback((fileList) => {
@@ -58,8 +108,11 @@ function App() {
     if (arr.length === 0) return;
     const csvs = arr.filter((f) => f.name.toLowerCase().endsWith('.csv'));
     if (csvs.length === 0) {
-      setError('Only .csv files are supported.');
+      pushToast('error', 'Only .csv files are supported.');
       return;
+    }
+    if (csvs.length < arr.length) {
+      pushToast('warn', `Skipped ${arr.length - csvs.length} non-CSV file(s).`);
     }
     if (csvs.length === 1) {
       loadPreview(csvs[0]);
@@ -67,11 +120,45 @@ function App() {
       setBatchFiles(csvs);
       setStage(STAGES.BATCH);
     }
-  }, [loadPreview]);
+  }, [loadPreview, pushToast]);
+
+  const dirty = useMemo(() => {
+    if (!preview || !editedRows) return false;
+    if (editedRows.length !== preview.transformedPreview.length) return true;
+    for (let i = 0; i < editedRows.length; i++) {
+      const a = editedRows[i];
+      const b = preview.transformedPreview[i];
+      for (const c of preview.transformedColumns) {
+        if ((a?.[c] ?? '') !== (b?.[c] ?? '')) return true;
+      }
+    }
+    return false;
+  }, [editedRows, preview]);
+
+  const setCell = useCallback((rowIdx, col, value) => {
+    setEditedRows((prev) => {
+      if (!prev) return prev;
+      const next = prev.slice();
+      next[rowIdx] = { ...next[rowIdx], [col]: value };
+      return next;
+    });
+  }, []);
+
+  const revertEdits = useCallback(() => {
+    if (!preview) return;
+    setEditedRows(preview.transformedPreview.map((r) => ({ ...r })));
+    pushToast('info', 'Edits reverted.');
+  }, [preview, pushToast]);
+
+  const finishConvert = useCallback((message) => {
+    setStage(STAGES.DONE);
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 2400);
+    pushToast('success', message);
+  }, [pushToast]);
 
   const doConvert = useCallback(async () => {
     if (!file) return;
-    setError('');
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -81,25 +168,24 @@ function App() {
         throw new Error(body.error || 'Conversion failed.');
       }
       const blob = await res.blob();
-      triggerDownload(blob, file.name.replace(/\.csv$/i, '_converted.csv'));
-      setStage(STAGES.DONE);
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 2400);
+      const outName = file.name.replace(/\.csv$/i, '_converted.csv');
+      triggerDownload(blob, outName);
+      finishConvert(`Downloaded ${outName}`);
     } catch (e) {
-      setError(e.message);
+      pushToast('error', e.message);
     }
-  }, [file]);
+  }, [file, finishConvert, pushToast]);
 
   // Apply user edits by POSTing the already-transformed JSON to the backend.
-  const doConvertEdited = useCallback(async (editedRows) => {
-    if (!file || !preview) return;
-    setError('');
+  const doConvertEdited = useCallback(async () => {
+    if (!file || !preview || !editedRows) return;
     try {
+      const outName = file.name.replace(/\.csv$/i, '_edited.csv');
       const res = await fetch('/api/convert-edited', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          filename: file.name.replace(/\.csv$/i, '_edited.csv'),
+          filename: outName,
           columns: preview.transformedColumns,
           rows: editedRows,
         }),
@@ -109,18 +195,15 @@ function App() {
         throw new Error(body.error || 'Conversion failed.');
       }
       const blob = await res.blob();
-      triggerDownload(blob, file.name.replace(/\.csv$/i, '_edited.csv'));
-      setStage(STAGES.DONE);
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 2400);
+      triggerDownload(blob, outName);
+      finishConvert(`Downloaded ${outName}`);
     } catch (e) {
-      setError(e.message);
+      pushToast('error', e.message);
     }
-  }, [file, preview]);
+  }, [file, preview, editedRows, finishConvert, pushToast]);
 
   const doConvertBatch = useCallback(async () => {
     if (batchFiles.length === 0) return;
-    setError('');
     try {
       const fd = new FormData();
       for (const f of batchFiles) fd.append('files', f);
@@ -129,37 +212,79 @@ function App() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || 'Batch conversion failed.');
       }
+      const summary = res.headers.get('X-Batch-Summary') || `${batchFiles.length} files`;
       const blob = await res.blob();
       triggerDownload(blob, 'converted_batch.zip');
-      setStage(STAGES.DONE);
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 2400);
+      finishConvert(`Batch complete — ${summary}`);
     } catch (e) {
-      setError(e.message);
+      pushToast('error', e.message);
     }
-  }, [batchFiles]);
+  }, [batchFiles, finishConvert, pushToast]);
 
   useEffect(() => {
     const onKey = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       const target = e.target;
       const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
-      if (mod && e.key === 'Enter' && stage === STAGES.PREVIEW) {
+
+      if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        doConvert();
+        setShowCmd((v) => !v);
+        return;
+      }
+      if (mod && e.key === 'Enter' && (stage === STAGES.PREVIEW || stage === STAGES.BATCH)) {
+        e.preventDefault();
+        if (stage === STAGES.PREVIEW) (dirty ? doConvertEdited() : doConvert());
+        else doConvertBatch();
       }
       if (e.key === 'Escape') {
-        if (showHelp) setShowHelp(false);
+        if (showCmd) setShowCmd(false);
+        else if (showHelp) setShowHelp(false);
         else if (stage !== STAGES.IDLE) reset();
       }
-      if (!typing && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
+      if (!typing && !showCmd && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
         e.preventDefault();
         setShowHelp((v) => !v);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [doConvert, reset, stage, showHelp]);
+  }, [doConvert, doConvertEdited, doConvertBatch, reset, stage, showHelp, showCmd, dirty]);
+
+  // Global drag overlay — a translucent "drop anywhere to upload" veil.
+  useEffect(() => {
+    let dragDepth = 0;
+    const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+
+    const onEnter = (e) => {
+      if (!hasFiles(e)) return;
+      dragDepth += 1;
+      setDragActive(true);
+    };
+    const onLeave = () => {
+      dragDepth -= 1;
+      if (dragDepth <= 0) { dragDepth = 0; setDragActive(false); }
+    };
+    const onOver = (e) => { if (hasFiles(e)) e.preventDefault(); };
+    const onDrop = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      setDragActive(false);
+      if (stage === STAGES.IDLE) handleFiles(e.dataTransfer.files);
+    };
+
+    window.addEventListener('dragenter', onEnter);
+    window.addEventListener('dragleave', onLeave);
+    window.addEventListener('dragover', onOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragenter', onEnter);
+      window.removeEventListener('dragleave', onLeave);
+      window.removeEventListener('dragover', onOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [handleFiles, stage]);
 
   // Paste-anywhere — paste a CSV file (or raw CSV text) from the clipboard.
   useEffect(() => {
@@ -184,6 +309,113 @@ function App() {
     return () => window.removeEventListener('paste', onPaste);
   }, [handleFiles, stage]);
 
+  // Build the command palette action list contextually.
+  const commands = useMemo(() => {
+    const cmds = [];
+    cmds.push({
+      id: 'theme',
+      title: theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
+      group: 'Theme',
+      keywords: 'dark light mode',
+      perform: () => setTheme(theme === 'dark' ? 'light' : 'dark'),
+    });
+    cmds.push({
+      id: 'help',
+      title: 'Show keyboard shortcuts',
+      hint: '?',
+      group: 'Help',
+      keywords: 'keys help',
+      perform: () => setShowHelp(true),
+    });
+    if (stage === STAGES.IDLE) {
+      cmds.push({
+        id: 'browse',
+        title: 'Browse for files…',
+        group: 'File',
+        keywords: 'upload open pick',
+        perform: () => openFilePicker(handleFiles),
+      });
+    }
+    if (stage === STAGES.PREVIEW) {
+      cmds.push({
+        id: 'download',
+        title: dirty ? 'Download as-is (discard edits)' : 'Download converted CSV',
+        hint: '⌘↵',
+        group: 'Download',
+        perform: doConvert,
+      });
+      if (dirty) {
+        cmds.push({
+          id: 'download-edited',
+          title: 'Download edited CSV',
+          group: 'Download',
+          keywords: 'save export changes',
+          perform: doConvertEdited,
+        });
+        cmds.push({
+          id: 'revert',
+          title: 'Revert all edits',
+          group: 'Edit',
+          keywords: 'undo reset',
+          perform: revertEdits,
+        });
+      }
+      cmds.push({
+        id: 'tab-converted',
+        title: 'Show Converted table',
+        group: 'View',
+        perform: () => setTab('converted'),
+      });
+      cmds.push({
+        id: 'tab-original',
+        title: 'Show Original table',
+        group: 'View',
+        perform: () => setTab('original'),
+      });
+      if (query) {
+        cmds.push({
+          id: 'clear-filter',
+          title: 'Clear row filter',
+          group: 'View',
+          perform: () => setQuery(''),
+        });
+      }
+      cmds.push({
+        id: 'remove',
+        title: 'Remove file and start over',
+        hint: 'Esc',
+        group: 'File',
+        perform: reset,
+      });
+    }
+    if (stage === STAGES.BATCH) {
+      cmds.push({
+        id: 'batch-convert',
+        title: 'Convert all → download ZIP',
+        hint: '⌘↵',
+        group: 'Download',
+        perform: doConvertBatch,
+      });
+      cmds.push({
+        id: 'batch-reset',
+        title: 'Clear all files',
+        hint: 'Esc',
+        group: 'File',
+        perform: reset,
+      });
+    }
+    if (stage === STAGES.DONE) {
+      cmds.push({
+        id: 'again',
+        title: 'Convert another',
+        hint: 'Esc',
+        group: 'Action',
+        perform: reset,
+      });
+    }
+    return cmds;
+  }, [theme, stage, dirty, query, handleFiles, doConvert, doConvertEdited, doConvertBatch, revertEdits, reset]);
+
   return (
     <div className="app" data-stage={stage}>
       <Aurora />
@@ -191,6 +423,7 @@ function App() {
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         onHelp={() => setShowHelp(true)}
+        onCmd={() => setShowCmd(true)}
       />
       <main className="shell">
         <header className="hero">
@@ -202,11 +435,9 @@ function App() {
           <p className="subtitle">Drop a CSV. Preview the transform. Download in one click.</p>
         </header>
 
-        {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
-
         <div className="stage-wrap" key={stage}>
           {stage === STAGES.IDLE && <DropZone onFiles={handleFiles} />}
-          {stage === STAGES.LOADING && <Loading filename={file?.name} />}
+          {stage === STAGES.LOADING && <Skeleton filename={file?.name} />}
           {stage === STAGES.BATCH && (
             <BatchPanel
               files={batchFiles}
@@ -220,10 +451,14 @@ function App() {
               }}
             />
           )}
-          {stage === STAGES.PREVIEW && preview && (
+          {stage === STAGES.PREVIEW && preview && editedRows && (
             <PreviewPanel
               file={file}
               preview={preview}
+              editedRows={editedRows}
+              setCell={setCell}
+              dirty={dirty}
+              onRevert={revertEdits}
               tab={tab}
               setTab={setTab}
               query={query}
@@ -242,13 +477,16 @@ function App() {
         </div>
       </main>
       <Footer />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {showConfetti && <Confetti />}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
+      {showCmd && <CommandPalette commands={commands} onClose={() => setShowCmd(false)} />}
+      {dragActive && <DragVeil active={stage === STAGES.IDLE} />}
     </div>
   );
 }
 
-function TopBar({ theme, onToggleTheme, onHelp }) {
+function TopBar({ theme, onToggleTheme, onHelp, onCmd }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -256,20 +494,15 @@ function TopBar({ theme, onToggleTheme, onHelp }) {
         <span>CSV Forge</span>
       </div>
       <div className="topbar-actions">
-        <button
-          className="icon-btn"
-          onClick={onHelp}
-          aria-label="Keyboard shortcuts"
-          title="Keyboard shortcuts (?)"
-        >
+        <button className="cmd-hint" onClick={onCmd} title="Command palette (⌘/Ctrl+K)">
+          <SearchIcon />
+          <span>Quick actions</span>
+          <kbd>⌘K</kbd>
+        </button>
+        <button className="icon-btn" onClick={onHelp} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
           <HelpIcon />
         </button>
-        <button
-          className="icon-btn"
-          onClick={onToggleTheme}
-          aria-label="Toggle theme"
-          title="Toggle theme"
-        >
+        <button className="icon-btn" onClick={onToggleTheme} aria-label="Toggle theme" title="Toggle theme">
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>
       </div>
@@ -353,51 +586,28 @@ function BatchPanel({ files, onConvert, onReset, onRemove }) {
   );
 }
 
-function Loading({ filename }) {
+function Skeleton({ filename }) {
   return (
-    <div className="card loading-card">
-      <div className="spinner" />
-      <div className="loading-text">
-        <div className="loading-title">Analyzing {filename}…</div>
-        <div className="loading-sub">Detecting encoding, parsing rows, mapping columns.</div>
+    <div className="skeleton">
+      <div className="sk-chip sk-shimmer" />
+      <div className="sk-stats">
+        {Array.from({ length: 4 }).map((_, i) => <div key={i} className="sk-stat sk-shimmer" />)}
+      </div>
+      <div className="sk-card sk-shimmer" style={{ height: 140 }} />
+      <div className="sk-card sk-shimmer" style={{ height: 280 }} />
+      <div className="sk-note">
+        <div className="spinner sm" />
+        <span>Analyzing {filename || 'your file'}…</span>
       </div>
     </div>
   );
 }
 
-function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
-  const { rowCount, originalColumns, transformedColumns, originalPreview, transformedPreview,
+function PreviewPanel({ file, preview, editedRows, setCell, dirty, onRevert, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
+  const { rowCount, originalColumns, transformedColumns, originalPreview,
     mapping, addedColumns, droppedColumns, truncated } = preview;
 
   const fileSize = useMemo(() => formatBytes(file?.size ?? 0), [file]);
-
-  // Local editable copy of the converted rows. Reset whenever a new preview arrives.
-  const [editedRows, setEditedRows] = useState(() => transformedPreview.map((r) => ({ ...r })));
-  useEffect(() => { setEditedRows(transformedPreview.map((r) => ({ ...r }))); }, [transformedPreview]);
-
-  const dirty = useMemo(() => {
-    if (editedRows.length !== transformedPreview.length) return true;
-    for (let i = 0; i < editedRows.length; i++) {
-      const a = editedRows[i];
-      const b = transformedPreview[i];
-      for (const c of transformedColumns) {
-        if ((a?.[c] ?? '') !== (b?.[c] ?? '')) return true;
-      }
-    }
-    return false;
-  }, [editedRows, transformedPreview, transformedColumns]);
-
-  const setCell = useCallback((rowIdx, col, value) => {
-    setEditedRows((prev) => {
-      const next = prev.slice();
-      next[rowIdx] = { ...next[rowIdx], [col]: value };
-      return next;
-    });
-  }, []);
-
-  const revertEdits = useCallback(() => {
-    setEditedRows(transformedPreview.map((r) => ({ ...r })));
-  }, [transformedPreview]);
 
   const activeRows = tab === 'converted' ? editedRows : originalPreview;
   const activeCols = tab === 'converted' ? transformedColumns : originalColumns;
@@ -485,7 +695,7 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
       <div className="actions">
         <button className="btn ghost" onClick={onReset}>← Back</button>
         {dirty && (
-          <button className="btn ghost" onClick={revertEdits} title="Discard edits">
+          <button className="btn ghost" onClick={onRevert} title="Discard edits">
             Revert edits
           </button>
         )}
@@ -497,7 +707,7 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
           <DownloadIcon /> Download as-is
         </button>
         {dirty && (
-          <button className="btn primary glow" onClick={() => onConvertEdited(editedRows)}>
+          <button className="btn primary glow" onClick={onConvertEdited} title="⌘/Ctrl+Enter">
             <DownloadIcon /> Download edited
           </button>
         )}
@@ -507,20 +717,22 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
 }
 
 function StatsRow({ rowCount, shown, inCols, outCols }) {
-  const stats = [
-    { label: 'Rows', value: rowCount.toLocaleString() },
-    { label: 'In columns', value: inCols },
-    { label: 'Out columns', value: outCols },
-    { label: 'Preview rows', value: shown },
-  ];
   return (
     <div className="stats">
-      {stats.map((s) => (
-        <div className="stat" key={s.label}>
-          <div className="stat-value">{s.value}</div>
-          <div className="stat-label">{s.label}</div>
-        </div>
-      ))}
+      <Stat label="Rows" value={rowCount} />
+      <Stat label="In columns" value={inCols} />
+      <Stat label="Out columns" value={outCols} />
+      <Stat label="Preview rows" value={shown} />
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  const animated = useCountUp(value);
+  return (
+    <div className="stat">
+      <div className="stat-value">{typeof value === 'number' ? animated.toLocaleString() : value}</div>
+      <div className="stat-label">{label}</div>
     </div>
   );
 }
@@ -667,11 +879,123 @@ function SuccessCard({ filename, onAgain }) {
   );
 }
 
-function ErrorBanner({ message, onDismiss }) {
+function ToastStack({ toasts, onDismiss }) {
+  if (toasts.length === 0) return null;
   return (
-    <div className="banner error" role="alert">
-      <span>{message}</span>
-      <button className="icon-btn sm" onClick={onDismiss} aria-label="Dismiss">✕</button>
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast-${t.type}`}>
+          <span className="toast-dot" />
+          <span className="toast-msg">{t.message}</span>
+          <button className="toast-x" onClick={() => onDismiss(t.id)} aria-label="Dismiss">✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DragVeil({ active }) {
+  return (
+    <div className={`drag-veil ${active ? 'ready' : ''}`} aria-hidden="true">
+      <div className="drag-veil-inner">
+        <div className="drag-ring">
+          <UploadIcon />
+        </div>
+        <div className="drag-veil-primary">{active ? 'Drop to upload' : 'Finish current step first'}</div>
+        <div className="drag-veil-secondary">
+          {active ? 'One file opens preview · multiple files go to batch' : 'Reset to upload new files'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommandPalette({ commands, onClose }) {
+  const [query, setQuery] = useState('');
+  const [cursor, setCursor] = useState(0);
+  const inputRef = useRef();
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return commands;
+    return commands.filter((c) => {
+      const hay = (c.title + ' ' + (c.keywords || '') + ' ' + (c.group || '')).toLowerCase();
+      return q.split(/\s+/).every((term) => hay.includes(term));
+    });
+  }, [commands, query]);
+
+  useEffect(() => { setCursor(0); }, [query]);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const run = (cmd) => {
+    if (!cmd) return;
+    onClose();
+    requestAnimationFrame(() => cmd.perform());
+  };
+
+  const onKey = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setCursor((c) => Math.min(c + 1, filtered.length - 1)); }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setCursor((c) => Math.max(c - 1, 0)); }
+    if (e.key === 'Enter')     { e.preventDefault(); run(filtered[cursor]); }
+    if (e.key === 'Escape')    { e.preventDefault(); onClose(); }
+  };
+
+  // Group by group label, preserving input order.
+  const grouped = useMemo(() => {
+    const map = new Map();
+    filtered.forEach((c) => {
+      const g = c.group || 'Actions';
+      if (!map.has(g)) map.set(g, []);
+      map.get(g).push(c);
+    });
+    return Array.from(map.entries());
+  }, [filtered]);
+
+  let flatIdx = -1;
+  return (
+    <div className="cmd-backdrop" onClick={onClose}>
+      <div className="cmd-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Command palette">
+        <div className="cmd-input-row">
+          <SearchIcon />
+          <input
+            ref={inputRef}
+            className="cmd-input"
+            placeholder="Type a command or search…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKey}
+          />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="cmd-list">
+          {grouped.length === 0 && <div className="cmd-empty">No matching commands.</div>}
+          {grouped.map(([group, cmds]) => (
+            <div key={group} className="cmd-group">
+              <div className="cmd-group-label">{group}</div>
+              {cmds.map((c) => {
+                flatIdx += 1;
+                const active = flatIdx === cursor;
+                return (
+                  <button
+                    key={c.id}
+                    className={`cmd-item ${active ? 'active' : ''}`}
+                    onMouseEnter={() => setCursor(flatIdx)}
+                    onClick={() => run(c)}
+                  >
+                    <span className="cmd-item-title">{c.title}</span>
+                    {c.hint && <span className="cmd-item-hint">{c.hint}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        <div className="cmd-footer">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> run</span>
+          <span><kbd>Esc</kbd> close</span>
+        </div>
+      </div>
     </div>
   );
 }

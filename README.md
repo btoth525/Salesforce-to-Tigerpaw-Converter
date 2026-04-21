@@ -1,38 +1,102 @@
 # Salesforce → Tigerpaw CSV Converter
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
-A small Flask + React web app that converts Salesforce CSV exports into
-Tigerpaw-ready imports. Drop a file, preview the transform, download the
-converted CSV. Ships as a single Docker image for Unraid / Docker / Compose.
+A production-ready Flask + React web app that turns Salesforce CSV exports into Tigerpaw-ready imports. Drop a file (or ten), preview the transform, optionally edit cells inline, and download. Ships as a single Docker image for Unraid / Docker / Compose.
+
+![Hero](docs/screenshots/01-hero-idle-dark.png)
 
 - 📖 [Step-by-step Scribe guide](https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ)
 - 📝 [CHANGELOG](CHANGELOG.md)
 
 ---
 
-## Features
+## Highlights
 
-- **Drag-and-drop** upload with live `/api/preview` — see exactly what will
-  be renamed, kept, added, or dropped **before** you download.
-- **Original ↔ Converted** tabbed tables with row search and highlighted columns.
-- **Dark / light** theme with keyboard shortcuts (`⌘/Ctrl+Enter` to convert,
-  `Esc` to reset).
-- **BOM + CRLF** output so Excel and Tigerpaw both import cleanly — no more
-  "open in Excel and re-save" workaround.
-- **Safe by default**: 10 MB upload cap, encoding sniffed without loading
-  the whole file, fail-fast `SECRET_KEY` in production, non-root container.
-- **One-container deploy**: multi-stage Docker image (Node builds the SPA →
-  Python runs Gunicorn) with a `/api/health` HEALTHCHECK.
+- **Preview before you commit** — side-by-side original ↔ converted tables with row search and hover-tooltips explaining every column change.
+- **Drag one file or drop ten** — single files go to the preview stage; 2+ files auto-route to a batch view that streams back a ZIP.
+- **Edit inline** — click any converted cell to edit before download. Optional; the no-edit path stays one click.
+- **Command palette (⌘K)** — searchable menu of every action, contextual to the current stage.
+- **Global drop-anywhere** — drag a file over the window and the entire app becomes a drop target.
+- **Toasts, skeleton loader, count-up stats** — the small polish that makes it feel like a $50/month product.
+- **Dark / light themes** with persistence, plus a keyboard help overlay (`?`).
+- **Safe by default** — 10 MB upload cap, encoding sniffed without loading the whole file, fail-fast `SECRET_KEY` in production, non-root container, `/api/health` HEALTHCHECK.
 
 ---
 
-## Run on Unraid / Docker (GHCR)
+## Tour
 
-The image is published to GitHub Container Registry on every push:
+### Preview the transform
 
+![Preview dark](docs/screenshots/02-preview-dark.png)
+
+A stat bar (with animated count-ups), the four-bucket **Transformation** card (Renamed / Kept / Added / Dropped), and the tabbed original↔converted table. Column headers in the converted tab reveal contextual tooltips on hover (*"Renamed from: Product Code"*, *"Added empty · Tigerpaw column"*, *"Kept from source"*, *"Preserved extra column"*). Renamed columns are purple; added columns are green with a `+` suffix.
+
+### Inline editing
+
+![Dirty edit](docs/screenshots/05-dirty-edit.png)
+
+Click any converted cell → it becomes an input. Enter commits, Esc cancels. Edit anything and the file chip sprouts an amber pulsing dot, a "Revert edits" button appears, and the primary action splits into **Download as-is** / **Download edited** so you can choose. Don't edit anything and the UX is identical to v1.0.
+
+### Command palette
+
+![Command palette](docs/screenshots/03-command-palette.png)
+
+`⌘K` / `Ctrl+K` anywhere. Every action is reachable without a mouse: download, revert edits, toggle theme, switch tabs, clear the filter, browse for files, remove the current file. The list is contextual — edits, revert, and tab-switching only appear in the preview stage.
+
+![Command palette filtered](docs/screenshots/04-cmd-filtered.png)
+
+Type to filter by title, keyword, or group.
+
+### Batch convert
+
+![Batch stage](docs/screenshots/07-batch.png)
+
+Drop 2-25 CSVs → batch stage. Single pulsing **Convert All → Download ZIP** button. Files that fail validation are listed inside `_errors.txt` in the zip, so partial success still yields useful output. Individual `✕` per file re-routes back to single-file preview if you cull down to one.
+
+### Drop-anywhere
+
+![Drag veil](docs/screenshots/10-drag-veil.png)
+
+Drag a file over any part of the page and the whole window becomes a drop target with a pulsing ring. No need to aim at the small dropzone.
+
+### Success toasts
+
+![Toast success](docs/screenshots/06-toast-success.png)
+
+Every action (download, revert, batch complete) surfaces a corner toast with the actual filename. Errors show red; warnings (e.g. "File has 2,300 rows — editing disabled") show amber. Auto-dismisses after ~4s or click the `✕`.
+
+### Light mode
+
+![Preview light](docs/screenshots/08-preview-light.png)
+
+Every element has light-theme styling. Theme preference is persisted to `localStorage`.
+
+### Help overlay
+
+![Help overlay](docs/screenshots/09-help-overlay.png)
+
+Press `?` anywhere for the shortcut cheatsheet.
+
+---
+
+## Keyboard shortcuts
+
+| Keys | Action |
+| --- | --- |
+| `⌘/Ctrl + K` | Open command palette |
+| `⌘/Ctrl + V` | Paste a CSV (file or raw text) |
+| `⌘/Ctrl + ↵` | Convert & download (preview or batch) |
+| `Esc` | Close overlay / reset / go back |
+| `?` | Show keyboard shortcuts |
+
+---
+
+## Deploy
+
+Prebuilt image on GHCR:
 ```
 ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
 ```
@@ -46,7 +110,7 @@ ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
 | **Network Type** | `Bridge` |
 | **WebUI** | `http://[IP]:[PORT:5023]/` |
 | **Port** — WebUI | Container `5023` → Host `5023` (TCP) |
-| **Variable** — `SECRET_KEY` | *any long random string*, e.g. output of `openssl rand -hex 32` |
+| **Variable** — `SECRET_KEY` | *any long random string*, e.g. `openssl rand -hex 32` |
 | **Variable** — `FLASK_ENV` | `production` |
 
 ### Docker CLI
@@ -66,28 +130,21 @@ docker run -d \
 ```bash
 # .env
 SECRET_KEY=<paste long random string>
-```
 
-```bash
 docker compose up -d
 ```
 
-Open `http://<host>:5023`. Container health is reported via `/api/health`.
+Container health is reported via `/api/health`.
 
-> **Note:** If you get `unauthorized` when pulling, the GHCR package is set
-> to Private. Either make it Public (Package settings → Change visibility),
-> or `docker login ghcr.io` with a PAT scoped `read:packages`.
+> If `docker pull` returns `denied`, the GHCR package is set to Private.
+> Open Package settings → Change visibility → Public, or `docker login
+> ghcr.io` with a PAT scoped `read:packages`.
 
 ---
 
 ## Development
 
-### Prerequisites
-
-- Python 3.12+
-- Node 20+
-
-### Run backend + frontend locally
+**Prerequisites:** Python 3.12+, Node 20+.
 
 ```bash
 # backend — http://localhost:5023
@@ -107,7 +164,7 @@ The Vite dev server proxies `/api/*` to Flask, so you hit the React UI at
 ### Tests + lint
 
 ```bash
-python -m unittest                  # 14 tests, ~0.1s
+python -m unittest                  # 20 tests, ~0.3s
 cd frontend && npm run lint         # eslint
 cd frontend && npm run build        # production bundle
 ```
@@ -118,13 +175,14 @@ cd frontend && npm run build        # production bundle
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/convert` | Upload a Salesforce CSV, download the converted Tigerpaw CSV. |
-| `POST` | `/api/preview` | Upload a Salesforce CSV, get JSON with original + converted preview rows, column mapping, row count. |
-| `GET` | `/api/health` | Returns `{"status":"ok"}`. Used by the container HEALTHCHECK. |
-| `GET` | `/` and `/<path>` | Serves the React SPA. |
+| `POST` | `/api/convert` | Single CSV → converted Tigerpaw CSV. |
+| `POST` | `/api/convert-batch` | N CSVs under `files` → ZIP (`_errors.txt` inside for any failures). |
+| `POST` | `/api/convert-edited` | JSON `{ filename, columns, rows }` → CSV (for post-preview edits). |
+| `POST` | `/api/preview` | Single CSV → JSON preview (first 500 rows + mapping metadata + `truncated` flag). |
+| `GET`  | `/api/health` | `{"status":"ok"}` — used by the container HEALTHCHECK. |
+| `GET`  | `/` and `/<path>` | Serves the React SPA. |
 
-All endpoints accept `multipart/form-data` with a `file` field and return
-`400` JSON with an `error` key on bad input.
+All endpoints accept `multipart/form-data` and return `400` JSON with an `error` key on bad input. Max upload: 10 MB; max files per batch: 25.
 
 ---
 
@@ -140,18 +198,12 @@ All endpoints accept `multipart/form-data` with a `file` field and return
 | `Net Unit Price` | `Price` |
 | `Unit Cost` | `Cost` |
 
-### Also
-
-- `Total Price` — values dropped, column re-added empty (Tigerpaw recomputes).
-- **Added (empty):** `Type`, `List Price`, `Vendor`, `Vendor Part number`,
-  `Project Phase`, `Installation Location`, `UOM`.
-- **Any other columns** in the source file are preserved and appended after
-  the Tigerpaw columns.
+- `Total Price` — values dropped, column re-added empty so Tigerpaw can recompute.
+- **Added (empty):** `Type`, `List Price`, `Vendor`, `Vendor Part number`, `Project Phase`, `Installation Location`, `UOM`.
+- Any other source columns are preserved and appended at the end.
 - Output is UTF-8 with BOM and CRLF line endings (Excel/Tigerpaw friendly).
 
-Required columns are enforced; if any of the five source columns are
-missing, `/api/convert` and `/api/preview` return `400` with the list of
-missing column names.
+Required columns are enforced; if any of the five source columns are missing, the converter returns `400` with the list of missing column names.
 
 ---
 
@@ -159,11 +211,9 @@ missing column names.
 
 | Env var | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `SECRET_KEY` | yes in prod | random per-process in dev | Flask signing key. Startup **fails** if `FLASK_ENV=production` and this is unset. |
+| `SECRET_KEY` | yes in prod | random per-process in dev | Startup **fails** if `FLASK_ENV=production` and this is unset. |
 | `FLASK_ENV` | no | unset | Set to `production` for the prod check. |
 | `PORT` | no | `5023` | Gunicorn bind port inside the container. |
-
-Upload cap: 10 MB (returns `413 File too large`).
 
 ---
 
@@ -176,11 +226,12 @@ Salesforce-to-Tigerpaw-Converter/
 ├── tests/test_app.py             # unittest suite (transform + routes)
 ├── Dockerfile                    # multi-stage: Node build → Python runtime
 ├── docker-compose.yml            # GHCR-based one-command deploy
+├── docs/screenshots/             # README imagery
 ├── .github/workflows/
-│   └── docker-publish.yml        # buildx → ghcr.io on push/tag
+│   └── docker-publish.yml        # buildx → ghcr.io on push / tag
 └── frontend/                     # Vite + React SPA
-    ├── src/App.jsx               # main UI (dropzone → preview → success)
-    ├── src/App.css               # theme + aurora + tables
+    ├── src/App.jsx               # main UI
+    ├── src/App.css               # theme + aurora + tables + overlays
     └── vite.config.js            # dev proxy /api → Flask
 ```
 
@@ -194,28 +245,20 @@ Salesforce-to-Tigerpaw-Converter/
 - Tag `v1.2.3` → `:1.2.3`, `:1.2`, `:latest`
 - Branch pushes (including `claude/**`) → `:<branch-name>` (for testing)
 
-To cut a release:
-
+Cut a release:
 ```bash
-git tag v1.1.0 && git push --tags
+git tag v1.2.0 && git push --tags
 ```
 
 ---
 
 ## Troubleshooting
 
-- **Tigerpaw import complains about columns** — Confirm the Salesforce
-  export contains `Product Code`, `Description`, `Quantity`, `Net Unit Price`,
-  `Unit Cost`. The preview panel lists exactly what's mapped.
-- **`413 File too large`** — Upload is over 10 MB. Split the export or raise
-  `MAX_UPLOAD_BYTES` in `SalesforceToTigerpaw.py`.
-- **Container reports unhealthy** — `docker logs salesforce-to-tigerpaw`;
-  the HEALTHCHECK hits `/api/health` on the internal port.
-- **GHCR pull fails with `denied`** — The package is still Private. Open
-  Package settings → Change visibility → Public (or login with a PAT).
-- **Browser says "Frontend not built."** — You ran Flask against a repo
-  where `frontend/dist` is missing. Use the Docker image for production or
-  `npm run build` in `frontend/` first.
+- **Tigerpaw import complains about columns** — Confirm the Salesforce export contains `Product Code`, `Description`, `Quantity`, `Net Unit Price`, `Unit Cost`. The preview panel's Transformation card lists exactly what got mapped.
+- **`413 File too large`** — Upload is over 10 MB. Split the export or raise `MAX_UPLOAD_BYTES` in `SalesforceToTigerpaw.py`.
+- **Container reports unhealthy** — `docker logs salesforce-to-tigerpaw`; the HEALTHCHECK hits `/api/health` on the internal port.
+- **GHCR pull fails with `denied`** — Package is still Private. Open Package settings → Change visibility → Public (or login with a PAT).
+- **"Editing disabled" toast** — File has more rows than the preview cap (500). Use Download as-is, or split the file.
 
 ---
 

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-04-21
+### Added
+- **Command palette** (`⌘K` / `Ctrl+K`): searchable, contextual overlay listing every action for the current stage (download, revert edits, toggle theme, switch tabs, clear filter, remove file, etc.). Arrow keys navigate, Enter runs, Esc closes.
+- **Global drag-drop veil**: drag a file anywhere over the window and the entire app becomes a drop target with a pulsing ring.
+- **Toast notifications**: success / warning / error / info toasts in the bottom-right, replacing the inline error banner. Auto-dismiss after ~4s or click to dismiss.
+- **Micro-animations**: stat cards count up from 0 on preview load; skeleton shimmer during `/api/preview` instead of a bare spinner.
+- **Bulk convert** via `POST /api/convert-batch`: N CSVs → ZIP. Failed files listed in `_errors.txt` inside the archive.
+- **Inline cell editing** in the Converted preview tab, with a dual-button action bar (`Download as-is` / `Download edited`) and a pulsing amber "dirty dot" on the file chip.
+- Preview row cap raised 25 → 500 plus a `truncated` flag on the response.
+- Screenshots for the README under `docs/screenshots/`.
+### Changed
+- Replaced `Loading` spinner with a layout-matching skeleton loader.
+- Top bar now includes a "Quick actions ⌘K" chip that opens the command palette.
+- Help overlay mentions the new paste/multi-file/edit tips.
+
 ## [1.1.0] - 2026-04-21
 ### Added
 - `/api/preview` endpoint returning a JSON preview of original + transformed rows, column mapping, added/dropped columns, and row count.
