@@ -11,9 +11,9 @@ For questions or support, contact Brandon Toth at ASAP Security Services.
 
 # 🚀 Salesforce-to-Tigerpaw Converter
 
-![Version](https://img.shields.io/badge/version-1.0.2-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-<!-- If you add CI/CD, add a status badge here -->
+[![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
 
 
@@ -27,6 +27,42 @@ Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. 
 See [CHANGELOG.md](CHANGELOG.md) for update history.
 
 ---
+
+## 🐳 Run from GHCR (Unraid / Docker / Compose)
+
+Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to
+GitHub Container Registry on every push:
+
+```bash
+docker run -d --name salesforce-to-tigerpaw \
+  -p 5023:5023 \
+  -e SECRET_KEY="$(openssl rand -hex 32)" \
+  -e FLASK_ENV=production \
+  --restart unless-stopped \
+  ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
+```
+
+Open <http://YOUR-HOST:5023>. The container includes a `/api/health`
+healthcheck that Unraid / Docker will surface as container health status.
+
+**Unraid quick-add (Docker tab → Add Container → Advanced view):**
+
+| Field | Value |
+| --- | --- |
+| Repository | `ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest` |
+| Network Type | Bridge |
+| WebUI | `http://[IP]:[PORT:5023]/` |
+| Port | Host `5023` → Container `5023` |
+| Env: `SECRET_KEY` | *(any long random string)* |
+| Env: `FLASK_ENV` | `production` |
+
+---
+
+## 🆕 What's New in v1.1.0 (2026)
+- `/api/preview` endpoint and redesigned frontend with drag-and-drop, column-mapping card, tabbed original↔converted table, dark/light theme, and keyboard shortcuts.
+- Safer backend: route collision fixed, 10 MB upload cap, proper 400 vs 500 errors, fail-fast `SECRET_KEY`.
+- Multi-stage Docker build with Gunicorn, non-root user, healthcheck.
+- GitHub Actions workflow publishes multi-arch images to GHCR.
 
 ## 🆕 What's New in v1.0.2 (Aug 2025)
 - Animated confetti celebration for conversions and favicon Easter egg

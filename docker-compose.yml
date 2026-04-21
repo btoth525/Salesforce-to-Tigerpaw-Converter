@@ -1,10 +1,19 @@
-version: '3.8'
 services:
   web:
-    build: .
+    # Pull the prebuilt image from GHCR (recommended for Unraid):
+    image: ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
+    # Or build locally instead:
+    # build: .
+    container_name: salesforce-to-tigerpaw
     ports:
       - "5023:5023"
     environment:
       - FLASK_ENV=production
-    volumes:
-      - .:/app
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY in .env or environment}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5023/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
