@@ -12,6 +12,7 @@ function App() {
   const [tab, setTab] = useState('converted');
   const [query, setQuery] = useState('');
   const [showConfetti, setShowConfetti] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -80,20 +81,55 @@ function App() {
   useEffect(() => {
     const onKey = (e) => {
       const mod = e.metaKey || e.ctrlKey;
+      const target = e.target;
+      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
       if (mod && e.key === 'Enter' && stage === STAGES.PREVIEW) {
         e.preventDefault();
         doConvert();
       }
-      if (e.key === 'Escape' && stage !== STAGES.IDLE) reset();
+      if (e.key === 'Escape') {
+        if (showHelp) setShowHelp(false);
+        else if (stage !== STAGES.IDLE) reset();
+      }
+      if (!typing && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
+        e.preventDefault();
+        setShowHelp((v) => !v);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [doConvert, reset, stage]);
+  }, [doConvert, reset, stage, showHelp]);
+
+  // Paste-anywhere — paste a CSV file (or raw CSV text) from the clipboard.
+  useEffect(() => {
+    const onPaste = (e) => {
+      if (stage !== STAGES.IDLE) return;
+      const items = e.clipboardData?.items || [];
+      for (const it of items) {
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) { loadPreview(f); return; }
+        }
+      }
+      const text = e.clipboardData?.getData('text');
+      if (text && text.includes(',') && text.includes('\n')) {
+        const blob = new Blob([text], { type: 'text/csv' });
+        const f = new File([blob], 'pasted.csv', { type: 'text/csv' });
+        loadPreview(f);
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [loadPreview, stage]);
 
   return (
     <div className="app" data-stage={stage}>
       <Aurora />
-      <TopBar theme={theme} onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
+      <TopBar
+        theme={theme}
+        onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+        onHelp={() => setShowHelp(true)}
+      />
       <main className="shell">
         <header className="hero">
           <h1 className="title">
@@ -106,38 +142,56 @@ function App() {
 
         {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
 
-        {stage === STAGES.IDLE && <DropZone onFile={loadPreview} />}
-        {stage === STAGES.LOADING && <Loading filename={file?.name} />}
-        {stage === STAGES.PREVIEW && preview && (
-          <PreviewPanel
-            file={file}
-            preview={preview}
-            tab={tab}
-            setTab={setTab}
-            query={query}
-            setQuery={setQuery}
-            onConvert={doConvert}
-            onReset={reset}
-          />
-        )}
-        {stage === STAGES.DONE && <SuccessCard filename={file?.name} onAgain={reset} />}
+        <div className="stage-wrap" key={stage}>
+          {stage === STAGES.IDLE && <DropZone onFile={loadPreview} />}
+          {stage === STAGES.LOADING && <Loading filename={file?.name} />}
+          {stage === STAGES.PREVIEW && preview && (
+            <PreviewPanel
+              file={file}
+              preview={preview}
+              tab={tab}
+              setTab={setTab}
+              query={query}
+              setQuery={setQuery}
+              onConvert={doConvert}
+              onReset={reset}
+            />
+          )}
+          {stage === STAGES.DONE && <SuccessCard filename={file?.name} onAgain={reset} />}
+        </div>
       </main>
       <Footer />
       {showConfetti && <Confetti />}
+      {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
     </div>
   );
 }
 
-function TopBar({ theme, onToggleTheme }) {
+function TopBar({ theme, onToggleTheme, onHelp }) {
   return (
     <div className="topbar">
       <div className="brand">
-        <span className="brand-dot" />
+        <img src="/favicon.png" alt="" className="brand-logo" />
         <span>CSV Forge</span>
       </div>
-      <button className="icon-btn" onClick={onToggleTheme} aria-label="Toggle theme" title="Toggle theme (⌘/Ctrl+Shift+L)">
-        {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-      </button>
+      <div className="topbar-actions">
+        <button
+          className="icon-btn"
+          onClick={onHelp}
+          aria-label="Keyboard shortcuts"
+          title="Keyboard shortcuts (?)"
+        >
+          <HelpIcon />
+        </button>
+        <button
+          className="icon-btn"
+          onClick={onToggleTheme}
+          aria-label="Toggle theme"
+          title="Toggle theme"
+        >
+          {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+        </button>
+      </div>
     </div>
   );
 }
@@ -167,7 +221,9 @@ function DropZone({ onFile }) {
       <div className="dropzone-inner">
         <div className="dropzone-icon"><UploadIcon /></div>
         <div className="dropzone-primary">Drop your Salesforce CSV here</div>
-        <div className="dropzone-secondary">or click to browse &middot; max 10 MB</div>
+        <div className="dropzone-secondary">
+          click to browse, drag-and-drop, or <kbd>⌘/Ctrl</kbd>+<kbd>V</kbd> to paste &middot; max 10 MB
+        </div>
         <input
           ref={inputRef}
           type="file"
@@ -209,14 +265,27 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
     );
   }, [activeRows, query]);
 
+  // For converted-column tooltips: reverse-lookup the source column.
+  const sourceFor = useMemo(() => {
+    const m = {};
+    for (const [src, dst] of Object.entries(mapping)) m[dst] = src;
+    return m;
+  }, [mapping]);
+
   return (
     <div className="preview">
+      <div className="file-chip" title={file?.name}>
+        <FileIcon />
+        <span className="file-chip-name">{file?.name}</span>
+        <span className="file-chip-size">{fileSize}</span>
+        <button className="file-chip-x" onClick={onReset} aria-label="Remove file">✕</button>
+      </div>
+
       <StatsRow
         rowCount={rowCount}
         shown={activeRows.length}
         inCols={originalColumns.length}
         outCols={transformedColumns.length}
-        fileSize={fileSize}
       />
 
       <MappingCard
@@ -245,7 +314,13 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
             />
           </div>
         </div>
-        <DataTable columns={activeCols} rows={filteredRows} addedColumns={addedColumns} mapping={mapping} isConverted={tab === 'converted'} />
+        <DataTable
+          columns={activeCols}
+          rows={filteredRows}
+          addedColumns={addedColumns}
+          sourceFor={sourceFor}
+          isConverted={tab === 'converted'}
+        />
         <div className="table-footnote">
           Showing {filteredRows.length} of {activeRows.length} preview rows{rowCount > activeRows.length ? ` (first ${activeRows.length} of ${rowCount})` : ''}.
         </div>
@@ -253,7 +328,7 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
 
       <div className="actions">
         <button className="btn ghost" onClick={onReset}>← Back</button>
-        <button className="btn primary" onClick={onConvert} title="⌘/Ctrl+Enter">
+        <button className="btn primary glow" onClick={onConvert} title="⌘/Ctrl+Enter">
           <DownloadIcon /> Convert &amp; Download
         </button>
       </div>
@@ -261,12 +336,11 @@ function PreviewPanel({ file, preview, tab, setTab, query, setQuery, onConvert, 
   );
 }
 
-function StatsRow({ rowCount, shown, inCols, outCols, fileSize }) {
+function StatsRow({ rowCount, shown, inCols, outCols }) {
   const stats = [
     { label: 'Rows', value: rowCount.toLocaleString() },
     { label: 'In columns', value: inCols },
     { label: 'Out columns', value: outCols },
-    { label: 'File size', value: fileSize },
     { label: 'Preview rows', value: shown },
   ];
   return (
@@ -310,13 +384,10 @@ function MappingGroup({ color, title, items }) {
   );
 }
 
-function DataTable({ columns, rows, addedColumns, mapping, isConverted }) {
+function DataTable({ columns, rows, addedColumns, sourceFor, isConverted }) {
   if (rows.length === 0) {
     return <div className="table-empty">No rows match your filter.</div>;
   }
-  const renameDests = new Set(
-    Object.entries(mapping).filter(([s, d]) => s !== d).map(([, d]) => d)
-  );
   const added = new Set(addedColumns);
   return (
     <div className="table-scroll">
@@ -325,11 +396,20 @@ function DataTable({ columns, rows, addedColumns, mapping, isConverted }) {
           <tr>
             {columns.map((c) => {
               let cls = '';
+              let tip = '';
               if (isConverted) {
-                if (added.has(c)) cls = 'col-added';
-                else if (renameDests.has(c)) cls = 'col-renamed';
+                if (added.has(c)) { cls = 'col-added'; tip = 'Added empty · Tigerpaw column'; }
+                else if (sourceFor[c] && sourceFor[c] !== c) { cls = 'col-renamed'; tip = `Renamed from: ${sourceFor[c]}`; }
+                else if (sourceFor[c]) { tip = 'Kept from source'; }
+                else { tip = 'Preserved extra column'; }
+              } else {
+                tip = 'Source column';
               }
-              return <th key={c} className={cls}>{c}</th>;
+              return (
+                <th key={c} className={cls} data-tip={tip}>
+                  <span>{c}</span>
+                </th>
+              );
             })}
           </tr>
         </thead>
@@ -365,6 +445,52 @@ function ErrorBanner({ message, onDismiss }) {
     <div className="banner error" role="alert">
       <span>{message}</span>
       <button className="icon-btn sm" onClick={onDismiss} aria-label="Dismiss">✕</button>
+    </div>
+  );
+}
+
+function HelpOverlay({ onClose }) {
+  const shortcuts = [
+    { keys: ['⌘/Ctrl', 'V'], desc: 'Paste a CSV (file or raw text)' },
+    { keys: ['⌘/Ctrl', '↵'], desc: 'Convert & download (on preview)' },
+    { keys: ['Esc'], desc: 'Close this overlay / reset' },
+    { keys: ['?'], desc: 'Show/hide this overlay' },
+  ];
+  const tips = [
+    'Drop-anywhere works — no need to aim at the zone.',
+    'Use the Filter box in the preview to search rows.',
+    'Added columns are green; renamed columns are purple.',
+    'Theme preference is saved per browser.',
+  ];
+  return (
+    <div className="help-backdrop" onClick={onClose}>
+      <div className="help-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Keyboard shortcuts">
+        <div className="help-header">
+          <div>Keyboard shortcuts</div>
+          <button className="icon-btn sm" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="help-body">
+          <ul className="kb-list">
+            {shortcuts.map((s, i) => (
+              <li key={i}>
+                <div className="kb-keys">
+                  {s.keys.map((k, j) => (
+                    <span key={j}>
+                      <kbd>{k}</kbd>{j < s.keys.length - 1 ? ' + ' : ''}
+                    </span>
+                  ))}
+                </div>
+                <span className="kb-desc">{s.desc}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="help-divider" />
+          <div className="help-title-sm">Tips</div>
+          <ul className="tips-list">
+            {tips.map((t, i) => <li key={i}>{t}</li>)}
+          </ul>
+        </div>
+      </div>
     </div>
   );
 }
@@ -466,6 +592,23 @@ function CheckIcon() {
   return (
     <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M5 12l5 5 9-11" />
+    </svg>
+  );
+}
+function HelpIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 1-1 1.7" />
+      <circle cx="12" cy="17" r="0.6" fill="currentColor" />
+    </svg>
+  );
+}
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
     </svg>
   );
 }
