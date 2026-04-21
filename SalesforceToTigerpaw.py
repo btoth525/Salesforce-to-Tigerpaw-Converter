@@ -220,6 +220,14 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS feedback_created ON feedback(created_at);
             CREATE INDEX IF NOT EXISTS feedback_status ON feedback(status);
+
+            -- Singleton row: tracks the last admin-triggered full reset so
+            -- the frontend can detect it and force clients to re-identify.
+            CREATE TABLE IF NOT EXISTS app_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                reset_at TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO app_state (id, reset_at) VALUES (1, '1970-01-01T00:00:00+00:00');
             """
         )
         # Idempotent schema migration for databases created before country_code
@@ -726,12 +734,15 @@ def public_stats_route():
         """,
         (week_start,),
     ).fetchall()
+    reset_row = conn.execute("SELECT reset_at FROM app_state WHERE id = 1").fetchone()
+    reset_at = reset_row["reset_at"] if reset_row else None
     return jsonify(
         {
             "totalJobs": total_jobs,
             "jobsToday": jobs_today,
             "activeUsers": active_users,
             "topWeek": [{"name": r["name"], "count": r["c"]} for r in top],
+            "resetAt": reset_at,
         }
     )
 
@@ -1162,13 +1173,23 @@ def admin_feedback_delete(fid: int):
 @app.route("/admin/api/reset", methods=["POST"])
 @admin_required
 def admin_reset():
-    """Wipe all telemetry. Irreversible. Admin confirms in the UI."""
+    """Wipe EVERYTHING: events, users, notes, feedback, GeoIP cache.
+
+    Bumps ``app_state.reset_at`` so connected clients know to drop their
+    cached identity on the next public-stats poll and re-show the name
+    modal. Admin confirms in the UI; no undo.
+    """
     conn = _db()
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute("DELETE FROM events")
+    conn.execute("DELETE FROM notes")
+    conn.execute("DELETE FROM feedback")
+    conn.execute("DELETE FROM ip_geo")
     conn.execute("DELETE FROM users")
+    conn.execute("UPDATE app_state SET reset_at = ? WHERE id = 1", (now,))
     conn.commit()
     logger.warning("admin wiped all telemetry from %s", _client_ip())
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "resetAt": now})
 
 
 def _parse_iso(s: str) -> datetime:
