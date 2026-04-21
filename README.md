@@ -1,6 +1,6 @@
 # Salesforce → Tigerpaw CSV Converter
 
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
@@ -22,7 +22,10 @@ A production-ready Flask + React web app that turns Salesforce CSV exports into 
 - **Global drop-anywhere** — drag a file over the window and the entire app becomes a drop target.
 - **Toasts, skeleton loader, count-up stats** — the small polish that makes it feel like a $50/month product.
 - **Dark / light themes** with persistence, plus a keyboard help overlay (`?`).
-- **Admin panel at `/admin`** — see who's using it, live event feed, device breakdown, per-user drill-down. Password-gated.
+- **Public stats on the idle page** — animated "🔥 jobs flipped" counter, "active now" pulsing pill, top-5 weekly 🥇🥈🥉 leaderboard.
+- **Team wall** — 280-char shoutbox where the team celebrates wins or drops a tip.
+- **Feedback & issues inbox** — floating FAB on every page, admins see submissions in a filterable card on `/admin` with one-click resolve.
+- **Admin panel at `/admin`** — password-gated dashboard with live event feed, device breakdown, country flag + city on each event (with GeoIP on), per-user drill-down, CSV export, per-user delete, and reset.
 - **Safe by default** — 10 MB upload cap, encoding sniffed without loading the whole file, fail-fast `SECRET_KEY` + `ADMIN_PASSWORD` in production, directory-traversal protection, non-root container, `/api/health` HEALTHCHECK.
 
 ---
@@ -101,6 +104,21 @@ Below the drop zone, the **Team Wall** is a 280-char shoutbox where anyone who's
 identified can post a quick note — celebrate a win, share a tip, drop a vibe.
 Auto-refreshes every 30s.
 
+### Feedback — suggestions & issues
+
+![Feedback modal](docs/screenshots/19-feedback-modal.png)
+
+A floating **Feedback** button sits in the bottom-right of every page. Click
+it (or `⌘K → "Send feedback"`) to file a 💡 **Suggestion** or a 🐛 **Issue**
+— up to 2,000 characters, with a live counter. Submissions land in the admin
+dashboard instantly.
+
+![Admin feedback inbox](docs/screenshots/20-admin-feedback.png)
+
+Admins get a dedicated **Feedback** card with an open-count badge, filter
+chips (Open / Resolved / All), color-coded pills per kind, and per-row
+**Mark resolved / Reopen / Delete** actions.
+
 ---
 
 ## Admin panel
@@ -117,8 +135,13 @@ production).
   the right.
 - **Live event feed** — auto-refreshes every 5 seconds, color-coded pills
   per event type (`identify`, `preview`, `convert`, `convert_edited`,
-  `convert_batch`), filename + row count + device + IP + relative time.
+  `convert_batch`, `feedback_submitted`, `note_posted`), filename + row
+  count + device + IP + relative time. With `ENABLE_GEOIP=1`, public IPs
+  resolve to a gradient pill showing the **country flag emoji + map pin +
+  "City, Region, Country"** (ISP on hover).
 - **Device / OS / browser breakdowns** — the last 7 days, with percent bars.
+- **Feedback inbox** — filterable card with open-count badge; one-click
+  resolve / reopen / delete.
 - **User table** — active-now green dot, event count, last seen, first
   seen, device fingerprint, last IP. Click any row for the drill-down.
 
@@ -147,8 +170,12 @@ All admin JSON endpoints require the session cookie set by `/admin/login`.
 | `GET`  | `/admin/api/users` | All users, newest `last_seen` first |
 | `GET`  | `/admin/api/user/<id>` | Single user + last 50 events |
 | `POST` | `/admin/api/user/<id>/delete` | Delete one user and all their events + notes |
-| `GET`  | `/admin/api/events?limit=N` | Recent events (newest first, max 500) |
+| `GET`  | `/admin/api/events?limit=N` | Recent events (newest first, max 500). Includes geo on each event when GeoIP is on. |
 | `GET`  | `/admin/api/export` | Download every event as a CSV (for Excel / audit) |
+| `GET`  | `/admin/api/feedback?status=open\|resolved\|all` | List feedback items + open count |
+| `POST` | `/admin/api/feedback/<id>/resolve` | Mark a feedback item resolved |
+| `POST` | `/admin/api/feedback/<id>/reopen` | Reopen a resolved item |
+| `DELETE` | `/admin/api/feedback/<id>` | Delete a feedback item permanently |
 | `POST` | `/admin/api/reset` | Wipe all telemetry |
 
 ### Privacy
@@ -267,6 +294,7 @@ cd frontend && npm run build        # production bundle
 | `POST` | `/api/identify` | Register / update the current user's name. Rejects empty / "Guest". |
 | `GET`  | `/api/public-stats` | Public totals + top-5 weekly leaderboard (safe to display on the idle page). |
 | `GET`/`POST` | `/api/notes` | Team wall — read recent notes, post a new one (280 char max). |
+| `POST` | `/api/feedback` | Submit a suggestion or issue (requires a real `X-User-Name`, 2 000 char max). |
 | `GET`  | `/api/health` | `{"status":"ok"}` — used by the container HEALTHCHECK. |
 | `GET`  | `/` and `/<path>` | Serves the React SPA. |
 
