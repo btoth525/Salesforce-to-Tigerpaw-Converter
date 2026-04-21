@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+frontend/dist/
+frontend/node_modules/
+
+# Uploads (customer data — never commit)
+uploads/*
+!uploads/.gitkeep
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/settings.json
+*.swp
+
+# Env
+.env
+.env.*
+!.env.example
