@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import secrets
+import zipfile
 
 import chardet
 import pandas as pd
@@ -55,9 +56,10 @@ DESIRED_ORDER = [
     "Installation Location",
 ]
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
-PREVIEW_ROWS = 25
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB (per request)
+PREVIEW_ROWS = 500  # enough to cover typical quote exports end-to-end
 ENCODING_SNIFF_BYTES = 64 * 1024
+BATCH_MAX_FILES = 25
 
 
 # --- App ---------------------------------------------------------------------
@@ -188,12 +190,15 @@ def preview_route():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    row_count = int(len(df))
     return jsonify(
         {
             "filename": secure_filename(file.filename),
             "originalColumns": list(df.columns),
             "transformedColumns": list(transformed.columns),
-            "rowCount": int(len(df)),
+            "rowCount": row_count,
+            "previewLimit": PREVIEW_ROWS,
+            "truncated": row_count > PREVIEW_ROWS,
             "originalPreview": _json_safe_records(df, PREVIEW_ROWS),
             "transformedPreview": _json_safe_records(transformed, PREVIEW_ROWS),
             "mapping": COLUMN_MAPPING,
@@ -228,6 +233,85 @@ def convert_route():
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+        },
+    )
+
+
+@app.route("/api/convert-edited", methods=["POST"])
+def convert_edited_route():
+    """Accept already-transformed JSON rows (with user edits) and return CSV."""
+    body = request.get_json(silent=True) or {}
+    filename = secure_filename(body.get("filename") or "converted.csv")
+    columns = body.get("columns")
+    rows = body.get("rows")
+    if not isinstance(columns, list) or not columns:
+        return jsonify({"error": "`columns` must be a non-empty list."}), 400
+    if not isinstance(rows, list):
+        return jsonify({"error": "`rows` must be a list of row objects."}), 400
+
+    # Coerce each row into a dict aligned with the requested column order;
+    # fill any missing keys with empty string so the CSV has a stable shape.
+    frame = pd.DataFrame(
+        [{c: ("" if r.get(c) is None else r.get(c)) for c in columns} for r in rows],
+        columns=columns,
+    )
+    payload = dataframe_to_csv_bytes(frame)
+    output_filename = filename if filename.endswith(".csv") else filename + ".csv"
+
+    return Response(
+        payload,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{output_filename}"',
+            "Content-Type": "text/csv; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+    )
+
+
+@app.route("/api/convert-batch", methods=["POST"])
+def convert_batch_route():
+    """Accept multiple CSVs under the ``files`` form field and return a ZIP."""
+    uploads = request.files.getlist("files")
+    if not uploads:
+        return jsonify({"error": "No files uploaded."}), 400
+    if len(uploads) > BATCH_MAX_FILES:
+        return (
+            jsonify({"error": f"Too many files. Max {BATCH_MAX_FILES} per batch."}),
+            400,
+        )
+
+    zip_buffer = io.BytesIO()
+    results = []
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in uploads:
+            name = secure_filename(f.filename or "upload.csv")
+            out_name = os.path.splitext(name)[0] + "_converted.csv"
+            if not name.lower().endswith(".csv"):
+                results.append({"filename": name, "status": "skipped", "error": "not a .csv"})
+                continue
+            try:
+                df = read_salesforce_csv(f.stream)
+                transformed = transform_salesforce_df(df)
+                zf.writestr(out_name, dataframe_to_csv_bytes(transformed))
+                results.append({"filename": name, "status": "ok", "rows": int(len(df))})
+            except ValueError as e:
+                results.append({"filename": name, "status": "error", "error": str(e)})
+
+        errors = [r for r in results if r["status"] != "ok"]
+        if errors:
+            summary = "Files with errors:\n" + "\n".join(
+                f"  - {r['filename']}: {r.get('error', 'unknown')}" for r in errors
+            )
+            zf.writestr("_errors.txt", summary.encode("utf-8"))
+
+    zip_buffer.seek(0)
+    return Response(
+        zip_buffer.getvalue(),
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="converted_batch.zip"',
+            "X-Batch-Summary": f"{sum(1 for r in results if r['status']=='ok')}/{len(uploads)} succeeded",
         },
     )
 

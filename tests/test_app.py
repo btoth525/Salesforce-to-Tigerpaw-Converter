@@ -142,6 +142,90 @@ class PreviewRouteTests(unittest.TestCase):
         self.assertIn("Total Price", body["droppedColumns"])
 
 
+class ConvertEditedRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_rejects_missing_columns(self):
+        r = self.client.post("/api/convert-edited", json={"rows": []})
+        self.assertEqual(r.status_code, 400)
+
+    def test_rejects_non_list_rows(self):
+        r = self.client.post(
+            "/api/convert-edited", json={"columns": ["A"], "rows": "nope"}
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_serializes_edited_rows_preserving_order(self):
+        body = {
+            "filename": "edited.csv",
+            "columns": ["Part Number", "Description", "Vendor"],
+            "rows": [
+                {"Part Number": "A1", "Description": "Widget", "Vendor": "ACME"},
+                {"Part Number": "B2", "Description": "Gadget", "Vendor": None},
+            ],
+        }
+        r = self.client.post("/api/convert-edited", json=body)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/csv")
+        self.assertIn('filename="edited.csv"', r.headers["Content-Disposition"])
+        lines = r.data.decode("utf-8-sig").splitlines()
+        self.assertEqual(lines[0], "Part Number,Description,Vendor")
+        self.assertEqual(lines[1], "A1,Widget,ACME")
+        self.assertEqual(lines[2], "B2,Gadget,")
+
+
+class ConvertBatchRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_rejects_empty_batch(self):
+        r = self.client.post("/api/convert-batch", data={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_converts_multiple_files_into_zip(self):
+        import zipfile as zf
+
+        r = self.client.post(
+            "/api/convert-batch",
+            data={
+                "files": [
+                    (io.BytesIO(_sample_csv_bytes(rows=2)), "a.csv"),
+                    (io.BytesIO(_sample_csv_bytes(rows=3)), "b.csv"),
+                ],
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "application/zip")
+        archive = zf.ZipFile(io.BytesIO(r.data))
+        names = archive.namelist()
+        self.assertIn("a_converted.csv", names)
+        self.assertIn("b_converted.csv", names)
+        self.assertNotIn("_errors.txt", names)
+
+    def test_partial_failure_includes_errors_file(self):
+        import zipfile as zf
+
+        bad_csv = b"Foo,Bar\n1,2\n"
+        r = self.client.post(
+            "/api/convert-batch",
+            data={
+                "files": [
+                    (io.BytesIO(_sample_csv_bytes()), "good.csv"),
+                    (io.BytesIO(bad_csv), "bad.csv"),
+                ],
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r.status_code, 200)
+        archive = zf.ZipFile(io.BytesIO(r.data))
+        names = archive.namelist()
+        self.assertIn("good_converted.csv", names)
+        self.assertIn("_errors.txt", names)
+        self.assertIn("bad.csv", archive.read("_errors.txt").decode())
+
+
 class SpaRouteTests(unittest.TestCase):
     def setUp(self):
         self.client = app.test_client()
