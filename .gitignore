@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller (legacy — no longer used, but block re-adds)
+*.spec
+build/
+dist/
+
+# Node / frontend build output
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# Uploads (customer data — never commit)
+uploads/
+
+# Editor / OS
+.DS_Store
+.vscode/
+*.swp
+
+# Env
+.env
+.env.*
+!.env.example
