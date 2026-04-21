@@ -861,13 +861,13 @@ function HeroStats() {
           {!hasToday && !hasActive && <span className="hero-muted">No conversions today — be the first.</span>}
         </div>
       </div>
-      {stats.topWeek.length > 0 && (
+      {stats.topAllTime && stats.topAllTime.length > 0 && (
         <div className="hero-leaderboard">
-          <div className="hero-lb-title">Top this week</div>
+          <div className="hero-lb-title">All-time podium</div>
           <ol>
-            {stats.topWeek.map((u, i) => (
+            {stats.topAllTime.slice(0, 3).map((u, i) => (
               <li key={u.name}>
-                <span className="hero-lb-rank">{['🥇','🥈','🥉','·','·'][i] || '·'}</span>
+                <span className="hero-lb-rank">{['🥇','🥈','🥉'][i]}</span>
                 <span className="hero-lb-name">{u.name}</span>
                 <span className="hero-lb-count">{u.count}</span>
               </li>

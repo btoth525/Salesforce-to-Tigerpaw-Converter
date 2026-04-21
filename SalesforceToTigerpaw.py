@@ -709,7 +709,6 @@ def public_stats_route():
     conn = _db()
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    week_start = (now - timedelta(days=7)).isoformat()
     total_jobs = conn.execute(
         "SELECT COUNT(*) c FROM events WHERE event_type IN ('convert', 'convert_edited', 'convert_batch')"
     ).fetchone()["c"]
@@ -722,17 +721,16 @@ def public_stats_route():
         1 for r in conn.execute("SELECT last_seen FROM users").fetchall()
         if _parse_iso(r["last_seen"]).timestamp() >= active_cutoff
     )
+    # All-time top 3 podium — never rolls off, cleared only by admin Reset.
     top = conn.execute(
         """
         SELECT user_name AS name, COUNT(*) c
         FROM events
         WHERE event_type IN ('convert', 'convert_edited', 'convert_batch')
-          AND created_at >= ?
         GROUP BY user_name
         ORDER BY c DESC
-        LIMIT 5
-        """,
-        (week_start,),
+        LIMIT 3
+        """
     ).fetchall()
     reset_row = conn.execute("SELECT reset_at FROM app_state WHERE id = 1").fetchone()
     reset_at = reset_row["reset_at"] if reset_row else None
@@ -741,7 +739,7 @@ def public_stats_route():
             "totalJobs": total_jobs,
             "jobsToday": jobs_today,
             "activeUsers": active_users,
-            "topWeek": [{"name": r["name"], "count": r["c"]} for r in top],
+            "topAllTime": [{"name": r["name"], "count": r["c"]} for r in top],
             "resetAt": reset_at,
         }
     )
