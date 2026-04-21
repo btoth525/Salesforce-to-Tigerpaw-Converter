@@ -154,6 +154,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [userName, setUserNameState] = useState(() => getUserName());
   const [showNamePrompt, setShowNamePrompt] = useState(() => !getUserName());
+  const [nameError, setNameError] = useState('');
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
@@ -161,30 +162,31 @@ function App() {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  // Tell the backend who we are on first visit (or whenever name changes).
-  useEffect(() => {
-    if (!userName) return;
-    const firstTime = !sessionStorage.getItem('csv-forge-identified');
-    apiFetch('/api/identify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: userName, firstTime }),
-    }).catch(() => { /* identify is best-effort */ });
-    sessionStorage.setItem('csv-forge-identified', '1');
-  }, [userName]);
-
-  const saveUserName = useCallback((name) => {
+  // Identify the user with the server — validates the name and records
+  // the first-visit event. Errors keep the modal open.
+  const saveUserName = useCallback(async (name) => {
     const cleaned = (name || '').trim();
-    if (!cleaned) {
-      setUserName('');
-      setUserNameState('');
-      setShowNamePrompt(true);
-      return;
+    setNameError('');
+    try {
+      const firstTime = !sessionStorage.getItem('csv-forge-identified');
+      const res = await fetch('/api/identify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Name': cleaned },
+        body: JSON.stringify({ name: cleaned, firstTime }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setNameError(body.error || 'Please enter your name.');
+        return;
+      }
+      setUserName(cleaned);
+      setUserNameState(cleaned);
+      setShowNamePrompt(false);
+      sessionStorage.setItem('csv-forge-identified', '1');
+      pushToast('success', `Hi, ${cleaned}!`);
+    } catch {
+      setNameError('Network error — try again.');
     }
-    setUserName(cleaned);
-    setUserNameState(cleaned);
-    setShowNamePrompt(false);
-    pushToast('success', `Hi, ${cleaned}!`);
   }, [pushToast]);
 
   const reset = useCallback(() => {
@@ -574,7 +576,13 @@ function App() {
         </header>
 
         <div className="stage-wrap" key={stage}>
-          {stage === STAGES.IDLE && <DropZone onFiles={handleFiles} />}
+          {stage === STAGES.IDLE && (
+            <>
+              <HeroStats />
+              <DropZone onFiles={handleFiles} />
+              <TeamWall currentUser={userName} pushToast={pushToast} />
+            </>
+          )}
           {stage === STAGES.LOADING && <Skeleton filename={file?.name} />}
           {stage === STAGES.BATCH && (
             <BatchPanel
@@ -625,9 +633,10 @@ function App() {
       {showNamePrompt && (
         <NameModal
           initialValue={userName}
-          allowSkip={!!userName}
+          allowCancel={!!userName}
+          error={nameError}
           onSave={saveUserName}
-          onSkip={() => setShowNamePrompt(false)}
+          onCancel={() => { setShowNamePrompt(false); setNameError(''); }}
         />
       )}
     </div>
@@ -664,19 +673,21 @@ function TopBar({ theme, onToggleTheme, onHelp, onCmd, userName, onChangeName })
   );
 }
 
-function NameModal({ initialValue, allowSkip, onSave, onSkip }) {
+function NameModal({ initialValue, allowCancel, onSave, onCancel, error }) {
   const [value, setValue] = useState(initialValue || '');
   const trapRef = useFocusTrap(true);
+  const clean = value.trim();
+  const invalid = !clean || clean.toLowerCase() === 'guest';
   return (
-    <div className="name-backdrop" onClick={allowSkip ? onSkip : undefined}>
+    <div className="name-backdrop" onClick={allowCancel ? onCancel : undefined}>
       <div ref={trapRef} className="name-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Enter your name">
         <div className="name-head">
-          <div className="name-title">What's your name?</div>
-          <div className="name-sub">So your teammates know who converted what. Stored on this browser only.</div>
+          <div className="name-title">{allowCancel ? 'Change your name' : 'Welcome! What\'s your name?'}</div>
+          <div className="name-sub">Required — so your teammates know who converted what. Stored on this browser only.</div>
         </div>
         <form
           className="name-form"
-          onSubmit={(e) => { e.preventDefault(); onSave(value); }}
+          onSubmit={(e) => { e.preventDefault(); if (!invalid) onSave(clean); }}
         >
           <input
             className="name-input"
@@ -686,14 +697,12 @@ function NameModal({ initialValue, allowSkip, onSave, onSkip }) {
             value={value}
             onChange={(e) => setValue(e.target.value)}
           />
+          {error && <div className="name-error">{error}</div>}
           <div className="name-actions">
-            {allowSkip && (
-              <button type="button" className="btn ghost" onClick={onSkip}>Cancel</button>
+            {allowCancel && (
+              <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
             )}
-            {!allowSkip && (
-              <button type="button" className="btn ghost" onClick={() => onSave('Guest')}>Skip (use Guest)</button>
-            )}
-            <button type="submit" className="btn primary" disabled={!value.trim()}>Save</button>
+            <button type="submit" className="btn primary" disabled={invalid}>Save</button>
           </div>
         </form>
       </div>
@@ -742,6 +751,203 @@ function DropZone({ onFiles }) {
       </div>
     </div>
   );
+}
+
+function HeroStats() {
+  const [stats, setStats] = useState(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/public-stats');
+        if (!res.ok) throw new Error('stats');
+        const data = await res.json();
+        if (alive) setStats(data);
+      } catch {
+        if (alive) setError(true);
+      }
+    };
+    load();
+    const t = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  const jobs = useCountUpInline(stats?.totalJobs ?? 0);
+
+  if (error || !stats) {
+    return (
+      <div className="hero-stats loading">
+        <div className="hero-big">—</div>
+        <div className="hero-sub">Warming up…</div>
+      </div>
+    );
+  }
+
+  const hasToday = stats.jobsToday > 0;
+  const hasActive = stats.activeUsers > 0;
+
+  return (
+    <div className="hero-stats">
+      <div className="hero-left">
+        <div className="hero-big">
+          <span className="hero-emoji" aria-hidden="true">🔥</span>
+          <span>{jobs.toLocaleString()}</span>
+          <span className="hero-label">jobs flipped</span>
+        </div>
+        <div className="hero-sub">
+          {hasToday && <span className="hero-pill today">{stats.jobsToday} today</span>}
+          {hasActive && <span className="hero-pill live"><span className="hero-dot" /> {stats.activeUsers} active now</span>}
+          {!hasToday && !hasActive && <span className="hero-muted">No conversions today — be the first.</span>}
+        </div>
+      </div>
+      {stats.topWeek.length > 0 && (
+        <div className="hero-leaderboard">
+          <div className="hero-lb-title">Top this week</div>
+          <ol>
+            {stats.topWeek.map((u, i) => (
+              <li key={u.name}>
+                <span className="hero-lb-rank">{['🥇','🥈','🥉','·','·'][i] || '·'}</span>
+                <span className="hero-lb-name">{u.name}</span>
+                <span className="hero-lb-count">{u.count}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Inline count-up (separate from useCountUp because this one uses it in a
+// component that doesn't live inside App).
+function useCountUpInline(target, duration = 650) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (typeof target !== 'number') { setValue(target); return; }
+    if (target === 0) { setValue(0); return; }
+    const start = performance.now();
+    let raf;
+    const tick = (t) => {
+      const elapsed = Math.min(1, (t - start) / duration);
+      const eased = 1 - Math.pow(1 - elapsed, 3);
+      setValue(Math.round(target * eased));
+      if (elapsed < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return value;
+}
+
+const WALL_PLACEHOLDERS = [
+  "How's the day going?",
+  'Crushed a big one?',
+  'Shout out a teammate',
+  'Drop a gif link. Or a vibe.',
+  'What are you working on?',
+  'Celebrate a win',
+  'Share a smart trick',
+];
+
+function TeamWall({ currentUser, pushToast }) {
+  const [notes, setNotes] = useState([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const placeholder = useMemo(() => WALL_PLACEHOLDERS[Math.floor(Math.random() * WALL_PLACEHOLDERS.length)], []);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/notes?limit=15');
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotes(data.notes || []);
+      setLoaded(true);
+    } catch { /* keep previous */ }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Failed to post.');
+      setText('');
+      setNotes((prev) => [{ id: body.id, user: body.user, text: body.text, createdAt: body.createdAt }, ...prev].slice(0, 15));
+      pushToast('success', 'Posted!');
+    } catch (err) {
+      pushToast('error', err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="wall">
+      <div className="wall-head">
+        <span className="wall-title">Team wall</span>
+        <span className="wall-sub">Say hi, share a win, leave a note · {notes.length} {notes.length === 1 ? 'note' : 'notes'}</span>
+      </div>
+      <form className="wall-form" onSubmit={submit}>
+        <div className="wall-input-wrap">
+          <input
+            className="wall-input"
+            maxLength={280}
+            placeholder={currentUser ? `${placeholder} (as ${currentUser})` : placeholder}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <span className={`wall-counter ${text.length > 240 ? 'near-limit' : ''}`}>{280 - text.length}</span>
+        </div>
+        <button className="btn primary" type="submit" disabled={!text.trim() || busy}>
+          {busy ? 'Posting…' : 'Post'}
+        </button>
+      </form>
+      <div className="wall-list">
+        {!loaded && <div className="wall-empty small muted">Loading…</div>}
+        {loaded && notes.length === 0 && (
+          <div className="wall-empty">No notes yet. Break the ice ✨</div>
+        )}
+        {notes.map((n) => (
+          <div key={n.id} className="wall-note">
+            <div className="wall-avatar" aria-hidden="true">{n.user.charAt(0).toUpperCase()}</div>
+            <div className="wall-body">
+              <div className="wall-meta">
+                <span className="wall-name">{n.user}</span>
+                <span className="wall-time" title={new Date(n.createdAt).toLocaleString()}>{formatRel(n.createdAt)}</span>
+              </div>
+              <div className="wall-text">{n.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatRel(iso) {
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 function BatchPanel({ files, busy, onConvert, onReset, onRemove }) {

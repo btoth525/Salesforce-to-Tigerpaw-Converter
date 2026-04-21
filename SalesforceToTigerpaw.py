@@ -6,7 +6,9 @@ Flask app exposing JSON APIs under ``/api/*`` and serving the React SPA from
 
 from __future__ import annotations
 
+import csv
 import io
+import ipaddress
 import json
 import logging
 import math
@@ -15,8 +17,10 @@ import re
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import chardet
@@ -86,6 +90,11 @@ DATA_DIR = os.environ.get("FORGE_DATA_DIR") or os.path.join(os.path.dirname(__fi
 DB_PATH = os.path.join(DATA_DIR, "forge.db")
 ACTIVE_WINDOW_SECONDS = 5 * 60  # user is "active" if seen in the last N seconds
 ADMIN_SESSION_KEY = "_admin"
+NOTE_MAX_LEN = 280
+NOTES_RECENT_LIMIT = 20
+ENABLE_GEOIP = os.environ.get("ENABLE_GEOIP", "0") == "1"
+GEOIP_TIMEOUT_SECONDS = 2.5
+GEOIP_CACHE_TTL_DAYS = 30
 
 
 # --- App ---------------------------------------------------------------------
@@ -174,6 +183,25 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
             CREATE INDEX IF NOT EXISTS events_user ON events(user_id);
+
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS notes_created ON notes(created_at);
+
+            CREATE TABLE IF NOT EXISTS ip_geo (
+                ip TEXT PRIMARY KEY,
+                country TEXT,
+                region TEXT,
+                city TEXT,
+                isp TEXT,
+                cached_at TEXT NOT NULL
+            );
             """
         )
         conn.commit()
@@ -212,6 +240,67 @@ def parse_user_agent(ua: str) -> dict:
     else: os_name, device = "Unknown", "Unknown"
 
     return {"browser": browser, "os": os_name, "device": device}
+
+
+def _is_public_ip(ip: str) -> bool:
+    if not ip or ip == "unknown":
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+        return not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast)
+    except ValueError:
+        return False
+
+
+def resolve_geo(ip: str) -> dict | None:
+    """Resolve an IP via ip-api.com (free, no key). Cached in SQLite.
+
+    Respects ENABLE_GEOIP=1. Returns ``None`` for private IPs, disabled,
+    network errors, or failed lookups. Cached rows expire after
+    ``GEOIP_CACHE_TTL_DAYS`` days.
+    """
+    if not ENABLE_GEOIP or not _is_public_ip(ip):
+        return None
+    conn = _db()
+    row = conn.execute(
+        "SELECT country, region, city, isp, cached_at FROM ip_geo WHERE ip = ?", (ip,)
+    ).fetchone()
+    now = datetime.now(timezone.utc)
+    if row:
+        # Honor TTL so we eventually re-resolve stale rows.
+        try:
+            cached = _parse_iso(row["cached_at"])
+            if (now - cached).days < GEOIP_CACHE_TTL_DAYS:
+                return {"country": row["country"], "region": row["region"],
+                        "city": row["city"], "isp": row["isp"], "cached": True}
+        except Exception:
+            pass
+
+    try:
+        req = urllib.request.Request(
+            f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp",
+            headers={"User-Agent": "CSV-Forge/1.4"},
+        )
+        with urllib.request.urlopen(req, timeout=GEOIP_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("status") != "success":
+            return None
+        result = {
+            "country": data.get("country"),
+            "region": data.get("regionName"),
+            "city": data.get("city"),
+            "isp": data.get("isp"),
+            "cached": False,
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO ip_geo (ip, country, region, city, isp, cached_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (ip, result["country"], result["region"], result["city"], result["isp"], now.isoformat()),
+        )
+        conn.commit()
+        return result
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        logger.warning("geoip lookup failed for %s: %s", ip, e)
+        return None
 
 
 # --- Client identification + event recording --------------------------------
@@ -576,12 +665,104 @@ def convert_batch_route():
     )
 
 
+@app.route("/api/public-stats")
+def public_stats_route():
+    """Stats safe for anyone to see — no IPs, no UAs, just counts + names."""
+    conn = _db()
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week_start = (now - timedelta(days=7)).isoformat()
+    total_jobs = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event_type IN ('convert', 'convert_edited', 'convert_batch')"
+    ).fetchone()["c"]
+    jobs_today = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE event_type IN ('convert', 'convert_edited', 'convert_batch') AND created_at >= ?",
+        (today_start,),
+    ).fetchone()["c"]
+    active_cutoff = now.timestamp() - ACTIVE_WINDOW_SECONDS
+    active_users = sum(
+        1 for r in conn.execute("SELECT last_seen FROM users").fetchall()
+        if _parse_iso(r["last_seen"]).timestamp() >= active_cutoff
+    )
+    top = conn.execute(
+        """
+        SELECT user_name AS name, COUNT(*) c
+        FROM events
+        WHERE event_type IN ('convert', 'convert_edited', 'convert_batch')
+          AND created_at >= ?
+        GROUP BY user_name
+        ORDER BY c DESC
+        LIMIT 5
+        """,
+        (week_start,),
+    ).fetchall()
+    return jsonify(
+        {
+            "totalJobs": total_jobs,
+            "jobsToday": jobs_today,
+            "activeUsers": active_users,
+            "topWeek": [{"name": r["name"], "count": r["c"]} for r in top],
+        }
+    )
+
+
+@app.route("/api/notes", methods=["GET", "POST"])
+def notes_route():
+    """Team wall — anyone (identified) can post a short note; anyone can read."""
+    conn = _db()
+    if request.method == "GET":
+        limit = min(int(request.args.get("limit", NOTES_RECENT_LIMIT)), 100)
+        rows = conn.execute(
+            "SELECT id, user_name, text, created_at FROM notes ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return jsonify(
+            {
+                "notes": [
+                    {"id": r["id"], "user": r["user_name"], "text": r["text"], "createdAt": r["created_at"]}
+                    for r in rows
+                ]
+            }
+        )
+
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    name = _current_user_name()
+    if name == "Guest":
+        return jsonify({"error": "Set your name before posting."}), 400
+    if not text:
+        return jsonify({"error": "Note can't be empty."}), 400
+    if len(text) > NOTE_MAX_LEN:
+        return jsonify({"error": f"Note too long — max {NOTE_MAX_LEN} characters."}), 400
+    ip = _client_ip()
+    ua = request.headers.get("User-Agent", "")
+    user_id = _upsert_user(name, ip, ua)
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "INSERT INTO notes (user_id, user_name, text, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, name, text, now),
+    )
+    conn.commit()
+    record_event("note_posted", {"length": len(text)})
+    return jsonify({"id": cur.lastrowid, "user": name, "text": text, "createdAt": now})
+
+
 @app.route("/api/identify", methods=["POST"])
 def identify_route():
-    """Register / refresh a user by name. Called once per browser on first visit."""
+    """Register / refresh a user by name. Called once per browser on first visit.
+
+    A real name is required — empty / whitespace / "Guest" are rejected so
+    admins always see who did what.
+    """
     body = request.get_json(silent=True) or {}
-    raw = body.get("name") or request.headers.get("X-User-Name")
+    raw = (body.get("name") or "").strip()
+    if not raw:
+        return jsonify({"error": "Please enter your name."}), 400
+    if raw.lower() == "guest":
+        return jsonify({"error": "Pick a real name — 'Guest' isn't allowed."}), 400
     name = _sanitize_name(raw)
+    if not name or name.lower() == "guest":
+        return jsonify({"error": "Please enter your name."}), 400
     ip = _client_ip()
     ua = request.headers.get("User-Agent", "")
     user_id = _upsert_user(name, ip, ua)
@@ -777,6 +958,7 @@ def admin_events():
     out = []
     for r in rows:
         ua = parse_user_agent(r["user_agent"] or "")
+        geo = resolve_geo(r["ip"]) if ENABLE_GEOIP else None
         out.append(
             {
                 "id": r["id"],
@@ -788,10 +970,60 @@ def admin_events():
                 "browser": ua["browser"],
                 "os": ua["os"],
                 "device": ua["device"],
+                "geo": geo,
                 "createdAt": r["created_at"],
             }
         )
-    return jsonify({"events": out})
+    return jsonify({"events": out, "geoipEnabled": ENABLE_GEOIP})
+
+
+@app.route("/admin/api/export")
+@admin_required
+def admin_export():
+    """Download every event as a CSV for spreadsheet analysis or archiving."""
+    conn = _db()
+    rows = conn.execute(
+        """
+        SELECT id, user_id, user_name, event_type, details, ip, user_agent, created_at
+        FROM events ORDER BY id ASC
+        """
+    ).fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(["id", "user_id", "user_name", "event_type", "details", "ip", "browser", "os", "device", "created_at"])
+    for r in rows:
+        ua = parse_user_agent(r["user_agent"] or "")
+        writer.writerow([
+            r["id"], r["user_id"], r["user_name"], r["event_type"],
+            r["details"] or "", r["ip"] or "", ua["browser"], ua["os"], ua["device"],
+            r["created_at"],
+        ])
+    payload = buf.getvalue().encode("utf-8-sig")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return Response(
+        payload,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="forge-events-{stamp}.csv"',
+            "Content-Type": "text/csv; charset=utf-8",
+        },
+    )
+
+
+@app.route("/admin/api/user/<int:user_id>/delete", methods=["POST"])
+@admin_required
+def admin_user_delete(user_id: int):
+    """Delete a single user and all their events."""
+    conn = _db()
+    row = conn.execute("SELECT name FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    conn.execute("DELETE FROM events WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    logger.warning("admin deleted user %s (%s) from %s", user_id, row["name"], _client_ip())
+    return jsonify({"ok": True})
 
 
 @app.route("/admin/api/reset", methods=["POST"])

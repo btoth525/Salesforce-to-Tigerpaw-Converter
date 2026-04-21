@@ -298,6 +298,14 @@ class IdentifyAndAdminTests(unittest.TestCase):
         self.assertEqual(body["name"], "Brandon T.")
         self.assertTrue(body["ok"])
 
+    def test_identify_rejects_empty_name(self):
+        r = self.client.post("/api/identify", json={"name": "   "})
+        self.assertEqual(r.status_code, 400)
+
+    def test_identify_rejects_guest(self):
+        r = self.client.post("/api/identify", json={"name": "guest"})
+        self.assertEqual(r.status_code, 400)
+
     def test_admin_routes_require_login(self):
         r = self.client.get("/admin/api/stats")
         self.assertEqual(r.status_code, 401)
@@ -348,6 +356,83 @@ class IdentifyAndAdminTests(unittest.TestCase):
         stats = self.client.get("/admin/api/stats").get_json()
         self.assertEqual(stats["totalUsers"], 0)
         self.assertEqual(stats["totalEvents"], 0)
+
+
+class PublicStatsAndNotesTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_public_stats_endpoint_shape(self):
+        r = self.client.get("/api/public-stats")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        for k in ("totalJobs", "jobsToday", "activeUsers", "topWeek"):
+            self.assertIn(k, body)
+        self.assertIsInstance(body["topWeek"], list)
+
+    def test_notes_roundtrip_requires_name(self):
+        # Without X-User-Name the backend falls back to Guest which is rejected.
+        r = self.client.post("/api/notes", json={"text": "hi"})
+        self.assertEqual(r.status_code, 400)
+
+        r = self.client.post(
+            "/api/notes",
+            json={"text": "crushing it today!"},
+            headers={"X-User-Name": "Noter"},
+        )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["user"], "Noter")
+        self.assertEqual(body["text"], "crushing it today!")
+
+        r = self.client.get("/api/notes?limit=5")
+        self.assertEqual(r.status_code, 200)
+        notes = r.get_json()["notes"]
+        self.assertTrue(any(n["text"] == "crushing it today!" for n in notes))
+
+    def test_notes_rejects_empty_and_too_long(self):
+        hdr = {"X-User-Name": "Noter"}
+        r1 = self.client.post("/api/notes", json={"text": "   "}, headers=hdr)
+        self.assertEqual(r1.status_code, 400)
+        r2 = self.client.post("/api/notes", json={"text": "x" * 300}, headers=hdr)
+        self.assertEqual(r2.status_code, 400)
+
+
+class AdminExportAndDeleteTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+        self.client.post("/admin/login", data={"password": "testpw"})
+
+    def test_export_returns_csv(self):
+        # Seed an event
+        self.client.post(
+            "/api/convert",
+            data={"file": (io.BytesIO(_sample_csv_bytes()), "x.csv")},
+            content_type="multipart/form-data",
+            headers={"X-User-Name": "Exporter"},
+        )
+        r = self.client.get("/admin/api/export")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/csv")
+        first_line = r.data.splitlines()[0].decode("utf-8-sig")
+        self.assertIn("user_name", first_line)
+        self.assertIn("event_type", first_line)
+
+    def test_delete_user_removes_their_events(self):
+        self.client.post(
+            "/api/convert",
+            data={"file": (io.BytesIO(_sample_csv_bytes()), "x.csv")},
+            content_type="multipart/form-data",
+            headers={"X-User-Name": "GoingAway"},
+        )
+        users = self.client.get("/admin/api/users").get_json()["users"]
+        target = next((u for u in users if u["name"] == "GoingAway"), None)
+        self.assertIsNotNone(target)
+        r = self.client.post(f"/admin/api/user/{target['id']}/delete")
+        self.assertEqual(r.status_code, 200)
+
+        users_after = self.client.get("/admin/api/users").get_json()["users"]
+        self.assertFalse(any(u["name"] == "GoingAway" for u in users_after))
 
 
 if __name__ == "__main__":

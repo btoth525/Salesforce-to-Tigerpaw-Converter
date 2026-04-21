@@ -18,6 +18,9 @@ node_modules/
 # Uploads (customer data — never commit)
 uploads/
 
+# Local telemetry SQLite (lives in a mounted volume in production)
+data/
+
 # Editor / OS
 .DS_Store
 .vscode/

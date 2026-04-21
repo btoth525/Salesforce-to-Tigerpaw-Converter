@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-04-21
+### Added
+- **Team wall on the main page** — 280-char shoutbox visible to anyone using the app. Auto-refreshes; any identified user can post. `GET/POST /api/notes`.
+- **Hero stats above the drop zone** — animated count-up of total jobs flipped, today's count, "active now" pulsing pill, and a top-5 weekly leaderboard. Fed by the new public `GET /api/public-stats` endpoint (no IPs or PII).
+- **CSV export** of every event from the admin panel via `GET /admin/api/export`. Includes user name, event type, details, IP, device/OS/browser, and timestamp. BOM + CRLF for Excel.
+- **Per-user delete** in the admin user table — one click (with confirm) wipes a single user and all their events + notes. `POST /admin/api/user/<id>/delete`.
+- **Optional IP geolocation** behind `ENABLE_GEOIP=1`. Resolves public IPs to city/region/country via ip-api.com (free, no key, 45 req/min). Results cached 30 days in SQLite; private IPs skipped. Off by default.
+### Changed
+- **Name is required** — the first-visit modal no longer has a "Skip (use Guest)" button. Backend `/api/identify` rejects empty names and the literal `Guest`. Existing "Guest" rows from prior versions still render but new ones can't be created.
+- Admin nav gets an "Export CSV" button alongside Reset data / Log out.
+
 ## [1.3.0] - 2026-04-21
 ### Added
 - **Admin panel at `/admin`** (password-gated via `ADMIN_PASSWORD`) with stat cards, 24-hour activity chart, live auto-refreshing event feed, device/OS/browser breakdowns, user table with active-now indicator, per-user drill-down modal, and a "Reset data" button.

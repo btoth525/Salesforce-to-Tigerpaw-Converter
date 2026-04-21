@@ -1,6 +1,6 @@
 # Salesforce → Tigerpaw CSV Converter
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
@@ -83,12 +83,23 @@ Press `?` anywhere for the shortcut cheatsheet.
 
 ### Name prompt + user chip
 
-![Name modal](docs/screenshots/11-name-modal.png)
+![Name required modal](docs/screenshots/16-name-required.png)
 
-First-visit modal asks for a name (skippable → "Guest"). Stored in
+First-visit modal asks for a name — **required, no skip**. The name is stored in
 `localStorage` and sent as `X-User-Name` on every API request so the admin
-panel can attribute activity. The name shows as a chip in the top bar —
-click it to change or clear.
+panel can attribute activity. Shows as a chip in the top bar; click to change.
+
+### Team wall + live stats on the main page
+
+![Hero stats + team wall](docs/screenshots/17-idle-with-wall.png)
+
+The idle page leads with a live **🔥 jobs flipped** counter (animated count-up),
+today's count, a green pulsing "active now" pill, and the top-5 leaderboard for
+the current week.
+
+Below the drop zone, the **Team Wall** is a 280-char shoutbox where anyone who's
+identified can post a quick note — celebrate a win, share a tip, drop a vibe.
+Auto-refreshes every 30s.
 
 ---
 
@@ -135,7 +146,9 @@ All admin JSON endpoints require the session cookie set by `/admin/login`.
 | `GET`  | `/admin/api/stats` | Summary + hourly activity + device/OS/browser breakdowns |
 | `GET`  | `/admin/api/users` | All users, newest `last_seen` first |
 | `GET`  | `/admin/api/user/<id>` | Single user + last 50 events |
+| `POST` | `/admin/api/user/<id>/delete` | Delete one user and all their events + notes |
 | `GET`  | `/admin/api/events?limit=N` | Recent events (newest first, max 500) |
+| `GET`  | `/admin/api/export` | Download every event as a CSV (for Excel / audit) |
 | `POST` | `/admin/api/reset` | Wipe all telemetry |
 
 ### Privacy
@@ -251,10 +264,13 @@ cd frontend && npm run build        # production bundle
 | `POST` | `/api/convert-batch` | N CSVs under `files` → ZIP (`_errors.txt` inside for any failures). |
 | `POST` | `/api/convert-edited` | JSON `{ filename, columns, rows }` → CSV (for post-preview edits). |
 | `POST` | `/api/preview` | Single CSV → JSON preview (first 500 rows + mapping metadata + `truncated` flag). |
+| `POST` | `/api/identify` | Register / update the current user's name. Rejects empty / "Guest". |
+| `GET`  | `/api/public-stats` | Public totals + top-5 weekly leaderboard (safe to display on the idle page). |
+| `GET`/`POST` | `/api/notes` | Team wall — read recent notes, post a new one (280 char max). |
 | `GET`  | `/api/health` | `{"status":"ok"}` — used by the container HEALTHCHECK. |
 | `GET`  | `/` and `/<path>` | Serves the React SPA. |
 
-All endpoints accept `multipart/form-data` and return `400` JSON with an `error` key on bad input. Max upload: 10 MB; max files per batch: 25.
+All endpoints accept `multipart/form-data` or JSON and return `400` JSON with an `error` key on bad input. Max upload: 10 MB; max files per batch: 25.
 
 ---
 
@@ -288,6 +304,7 @@ Required columns are enforced; if any of the five source columns are missing, th
 | `FLASK_ENV` | no | unset | Set to `production` for the prod check. |
 | `PORT` | no | `5023` | Gunicorn bind port inside the container. |
 | `FORGE_DATA_DIR` | no | `/app/data` (container) or `./data` (dev) | Where `forge.db` (SQLite telemetry) lives. Mount a volume here in production. |
+| `ENABLE_GEOIP` | no | `0` | Set to `1` to resolve IP → city/region/country via ip-api.com (free tier) and show it in the admin event feed. Results cached 30 days in SQLite; IPs from private ranges are skipped. Third-party dependency — read the privacy note before enabling. |
 
 ---
 
