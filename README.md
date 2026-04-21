@@ -1,40 +1,59 @@
-## 📖 How-To Guide
-
-For a step-by-step tutorial, see the Scribe guide:
-
-[How to Use Brandon's Salesforce To TigerPaw Converter](https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ)
-
-## 📬 Contact & Support
-
-For questions or support, contact Brandon Toth at ASAP Security Services.
-
-
-# 🚀 Salesforce-to-Tigerpaw Converter
+# Salesforce → Tigerpaw CSV Converter
 
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
+A small Flask + React web app that converts Salesforce CSV exports into
+Tigerpaw-ready imports. Drop a file, preview the transform, download the
+converted CSV. Ships as a single Docker image for Unraid / Docker / Compose.
 
-
-Convert Salesforce CSV reports to Tigerpaw format with a simple Python web app. Easily deployable via Docker or Unraid.
-
----
-
-
-
-## 📋 Changelog
-See [CHANGELOG.md](CHANGELOG.md) for update history.
+- 📖 [Step-by-step Scribe guide](https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ)
+- 📝 [CHANGELOG](CHANGELOG.md)
 
 ---
 
-## 🐳 Run from GHCR (Unraid / Docker / Compose)
+## Features
 
-Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to
-GitHub Container Registry on every push:
+- **Drag-and-drop** upload with live `/api/preview` — see exactly what will
+  be renamed, kept, added, or dropped **before** you download.
+- **Original ↔ Converted** tabbed tables with row search and highlighted columns.
+- **Dark / light** theme with keyboard shortcuts (`⌘/Ctrl+Enter` to convert,
+  `Esc` to reset).
+- **BOM + CRLF** output so Excel and Tigerpaw both import cleanly — no more
+  "open in Excel and re-save" workaround.
+- **Safe by default**: 10 MB upload cap, encoding sniffed without loading
+  the whole file, fail-fast `SECRET_KEY` in production, non-root container.
+- **One-container deploy**: multi-stage Docker image (Node builds the SPA →
+  Python runs Gunicorn) with a `/api/health` HEALTHCHECK.
+
+---
+
+## Run on Unraid / Docker (GHCR)
+
+The image is published to GitHub Container Registry on every push:
+
+```
+ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
+```
+
+### Unraid — Add Container (Advanced View)
+
+| Field | Value |
+| --- | --- |
+| **Name** | `salesforce-to-tigerpaw` |
+| **Repository** | `ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest` |
+| **Network Type** | `Bridge` |
+| **WebUI** | `http://[IP]:[PORT:5023]/` |
+| **Port** — WebUI | Container `5023` → Host `5023` (TCP) |
+| **Variable** — `SECRET_KEY` | *any long random string*, e.g. output of `openssl rand -hex 32` |
+| **Variable** — `FLASK_ENV` | `production` |
+
+### Docker CLI
 
 ```bash
-docker run -d --name salesforce-to-tigerpaw \
+docker run -d \
+  --name salesforce-to-tigerpaw \
   -p 5023:5023 \
   -e SECRET_KEY="$(openssl rand -hex 32)" \
   -e FLASK_ENV=production \
@@ -42,240 +61,176 @@ docker run -d --name salesforce-to-tigerpaw \
   ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
 ```
 
-Open <http://YOUR-HOST:5023>. The container includes a `/api/health`
-healthcheck that Unraid / Docker will surface as container health status.
+### Docker Compose
 
-**Unraid quick-add (Docker tab → Add Container → Advanced view):**
+```bash
+# .env
+SECRET_KEY=<paste long random string>
+```
 
-| Field | Value |
+```bash
+docker compose up -d
+```
+
+Open `http://<host>:5023`. Container health is reported via `/api/health`.
+
+> **Note:** If you get `unauthorized` when pulling, the GHCR package is set
+> to Private. Either make it Public (Package settings → Change visibility),
+> or `docker login ghcr.io` with a PAT scoped `read:packages`.
+
+---
+
+## Development
+
+### Prerequisites
+
+- Python 3.12+
+- Node 20+
+
+### Run backend + frontend locally
+
+```bash
+# backend — http://localhost:5023
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python SalesforceToTigerpaw.py
+
+# frontend (separate shell) — http://localhost:5173
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api/*` to Flask, so you hit the React UI at
+`http://localhost:5173` and it talks to the live backend transparently.
+
+### Tests + lint
+
+```bash
+python -m unittest                  # 14 tests, ~0.1s
+cd frontend && npm run lint         # eslint
+cd frontend && npm run build        # production bundle
+```
+
+---
+
+## API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/convert` | Upload a Salesforce CSV, download the converted Tigerpaw CSV. |
+| `POST` | `/api/preview` | Upload a Salesforce CSV, get JSON with original + converted preview rows, column mapping, row count. |
+| `GET` | `/api/health` | Returns `{"status":"ok"}`. Used by the container HEALTHCHECK. |
+| `GET` | `/` and `/<path>` | Serves the React SPA. |
+
+All endpoints accept `multipart/form-data` with a `file` field and return
+`400` JSON with an `error` key on bad input.
+
+---
+
+## Column transformation
+
+### Source → Destination
+
+| Salesforce column | Tigerpaw column |
 | --- | --- |
-| Repository | `ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest` |
-| Network Type | Bridge |
-| WebUI | `http://[IP]:[PORT:5023]/` |
-| Port | Host `5023` → Container `5023` |
-| Env: `SECRET_KEY` | *(any long random string)* |
-| Env: `FLASK_ENV` | `production` |
+| `Product Code` | `Part Number` |
+| `Description` | `Description` |
+| `Quantity` | `Quantity` |
+| `Net Unit Price` | `Price` |
+| `Unit Cost` | `Cost` |
+
+### Also
+
+- `Total Price` — values dropped, column re-added empty (Tigerpaw recomputes).
+- **Added (empty):** `Type`, `List Price`, `Vendor`, `Vendor Part number`,
+  `Project Phase`, `Installation Location`, `UOM`.
+- **Any other columns** in the source file are preserved and appended after
+  the Tigerpaw columns.
+- Output is UTF-8 with BOM and CRLF line endings (Excel/Tigerpaw friendly).
+
+Required columns are enforced; if any of the five source columns are
+missing, `/api/convert` and `/api/preview` return `400` with the list of
+missing column names.
 
 ---
 
-## 🆕 What's New in v1.1.0 (2026)
-- `/api/preview` endpoint and redesigned frontend with drag-and-drop, column-mapping card, tabbed original↔converted table, dark/light theme, and keyboard shortcuts.
-- Safer backend: route collision fixed, 10 MB upload cap, proper 400 vs 500 errors, fail-fast `SECRET_KEY`.
-- Multi-stage Docker build with Gunicorn, non-root user, healthcheck.
-- GitHub Actions workflow publishes multi-arch images to GHCR.
+## Configuration
 
-## 🆕 What's New in v1.0.2 (Aug 2025)
-- Animated confetti celebration for conversions and favicon Easter egg
-- Modern, beautiful React frontend (glassmorphism, gradients, responsive)
-- Large animated favicon and custom branding
-- Contact button for Brandon Toth
-- Animated background gradients
-- Footer with version, last updated, and documentation link
-- Link to ScribeHow documentation
-- Improved UI/UX polish, accessibility, and mobile responsiveness
+| Env var | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `SECRET_KEY` | yes in prod | random per-process in dev | Flask signing key. Startup **fails** if `FLASK_ENV=production` and this is unset. |
+| `FLASK_ENV` | no | unset | Set to `production` for the prod check. |
+| `PORT` | no | `5023` | Gunicorn bind port inside the container. |
 
+Upload cap: 10 MB (returns `413 File too large`).
 
 ---
 
-
-## ✨ Features
-- Converts Salesforce CSVs to Tigerpaw-compatible format
-- Modern React frontend (animated confetti, glassmorphism, gradients, responsive)
-- Animated favicon and custom branding
-- Contact button for Brandon Toth
-- Animated background gradients
-- Footer with version, last updated, and documentation link
-- Web interface (Flask)
-- Easy deployment with Docker
-- Ready for Unraid as a Docker container
-- Python Flask backend for Salesforce-to-Tigerpaw CSV conversion
-- Docker Compose for easy full-stack deployment
-
----
-
-
-## 🗂️ Project Structure
+## Repository layout
 
 ```
 Salesforce-to-Tigerpaw-Converter/
-├── SalesforceToTigerpaw.py         # Main Flask app and CSV converter logic
-├── requirements.txt                # Python dependencies
-├── Dockerfile                      # Docker build instructions
-├── docker-compose.yml              # Docker Compose configuration
-├── frontend/                      # React frontend code
-│   ├── package.json                # Frontend dependencies
-│   └── src/                       # React source files
-├── templates/
-│   └── index.html                  # Web interface HTML
-├── static/
-│   └── favicon.png                 # App icon
-├── uploads/                        # Uploaded files (ignored by git)
-├── build/                          # Build artifacts (ignored by git)
-└── README.md                       # Project documentation
+├── SalesforceToTigerpaw.py       # Flask app + CSV transform pipeline
+├── requirements.txt              # Python deps
+├── tests/test_app.py             # unittest suite (transform + routes)
+├── Dockerfile                    # multi-stage: Node build → Python runtime
+├── docker-compose.yml            # GHCR-based one-command deploy
+├── .github/workflows/
+│   └── docker-publish.yml        # buildx → ghcr.io on push/tag
+└── frontend/                     # Vite + React SPA
+    ├── src/App.jsx               # main UI (dropzone → preview → success)
+    ├── src/App.css               # theme + aurora + tables
+    └── vite.config.js            # dev proxy /api → Flask
 ```
 
-## 🏁 Quickstart (Local)
-1. **Clone the repo:**
-   ```sh
-   git clone https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter.git
-   cd Salesforce-to-Tigerpaw-Converter
-   ```
-2. **Create and activate a Python virtual environment:**
-   ```sh
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-3. **Install dependencies:**
-   ```sh
-   pip install -r requirements.txt
-   ```
-4. **Run the app:**
-   ```sh
-   python SalesforceToTigerpaw.py
-   ```
-   The app will run on port 5023 by default.
-5. **Start the frontend (React):**
-   ```sh
-   cd frontend
-   npm install
-   npm run dev
-   ```
-   - React app: http://localhost:5173
-   - Flask backend: http://localhost:5023
-6. **Use the web interface to upload and convert your Salesforce CSV for Tigerpaw.**
+---
 
-## 🧑‍💻 Main Python Functions
+## Release
 
-- `process_file(input_stream)`: Reads and converts a Salesforce CSV to Tigerpaw format.
-- `detect_encoding(input_stream)`: Detects file encoding for robust CSV parsing.
-- `parse_csv(input_stream, encoding)`: Parses CSV with multiple delimiters.
-- `transform_salesforce_df(df)`: Renames, adds, and reorders columns for Tigerpaw import.
+`main` + semver tags drive the published image tags:
 
-## ⚙️ Configuration
+- Every push to `main` → `:latest` + `:sha-<short>`
+- Tag `v1.2.3` → `:1.2.3`, `:1.2`, `:latest`
+- Branch pushes (including `claude/**`) → `:<branch-name>` (for testing)
 
-- **Flask Secret Key**: Set in `SalesforceToTigerpaw.py` (`app.config['SECRET_KEY']`).
-   For production, set this using an environment variable for better security:
-   ```python
-   import os
-      app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'PLEASE_CHANGE_ME_SECRET_KEY')
-- **Important:** Always set your own secret key in production. Never use the default placeholder value.
-   ```
-- **Port**: Default is `5023`. Change in the last line of `SalesforceToTigerpaw.py` if needed.
-- **Uploads Folder**: Files are not saved server-side; conversion is in-memory for privacy and speed.
+To cut a release:
 
-
-## 🛠️ Troubleshooting
-
-- **Tigerpaw Import Issues**: The app now outputs CSVs with Windows line endings and a UTF-8 BOM for maximum compatibility. Tigerpaw should recognize the columns and import without errors. You no longer need to open and re-save in Excel.
-- **CSV Errors**: Ensure your Salesforce export includes the required columns: `Product Code`, `Description`, `Quantity`, `Net Unit Price`, `Unit Cost`.
-- **File Type**: Only `.csv` files are accepted.
-- **Empty File**: The app will alert you if the uploaded file is empty or invalid.
-- **Browser Issues**: Use a modern browser for best results.
-- Make sure both backend and frontend are running.
-- The React app posts to `http://localhost:5023/` for file conversion.
-- For CORS issues, update Flask to allow requests from the frontend port.
-
-## 🔄 Updating Dependencies
-
-To update Python packages:
-```sh
-pip install --upgrade -r requirements.txt
-```
-Or update a specific package:
-```sh
-pip install --upgrade <package-name>
+```bash
+git tag v1.1.0 && git push --tags
 ```
 
+---
+
+## Troubleshooting
+
+- **Tigerpaw import complains about columns** — Confirm the Salesforce
+  export contains `Product Code`, `Description`, `Quantity`, `Net Unit Price`,
+  `Unit Cost`. The preview panel lists exactly what's mapped.
+- **`413 File too large`** — Upload is over 10 MB. Split the export or raise
+  `MAX_UPLOAD_BYTES` in `SalesforceToTigerpaw.py`.
+- **Container reports unhealthy** — `docker logs salesforce-to-tigerpaw`;
+  the HEALTHCHECK hits `/api/health` on the internal port.
+- **GHCR pull fails with `denied`** — The package is still Private. Open
+  Package settings → Change visibility → Public (or login with a PAT).
+- **Browser says "Frontend not built."** — You ran Flask against a repo
+  where `frontend/dist` is missing. Use the Docker image for production or
+  `npm run build` in `frontend/` first.
 
 ---
 
-## 🧑‍🔧 Running in Unraid (Docker)
-1. **Build the Docker image:**
-   ```sh
-   docker build -t salesforce-tigerpaw .
-   ```
-2. **Run the container:**
-   ```sh
-   docker run -d -p 5023:5023 --name salesforce-tigerpaw salesforce-tigerpaw
-   ```
-3. **Access the web interface:**
-   - Open your browser and go to: `http://<your-unraid-ip>:5023`
+## Contributing
 
-### 🟢 Unraid Setup Tips
-- Use Unraid's Docker tab to add a new container.
-- Set the repository to your built image or use the CLI above.
-- Map ports and volumes as needed for uploads/outputs.
-- Update the container by pulling the latest repo and rebuilding the image.
+Pull requests welcome. For non-trivial changes, open an issue first.
+Please keep `python -m unittest` green and run `npm run lint` in
+`frontend/` before submitting.
 
 ---
 
-## Deploying on Unraid (Docker)
+## License
 
-1. Build the Docker image locally:
-   ```sh
-   docker build -t salesforce-tigerpaw:latest .
-   ```
-2. In Unraid, go to the Docker tab and add a new container.
-3. Set the repository to your built image (or push to Docker Hub and use that).
-4. Map port 5023 (host) to 5023 (container).
-5. Set environment variables as needed (e.g., FLASK_ENV=production).
-6. Start the container and access the app at `http://your-unraid-ip:5023`.
+MIT — see [LICENSE](LICENSE).
 
-## Docker Hub Release
+## Contact
 
-To publish for others:
-1. Log in to Docker Hub:
-   ```sh
-   docker login
-   ```
-2. Tag your image:
-   ```sh
-   docker tag salesforce-tigerpaw:latest yourdockerhubusername/salesforce-tigerpaw:1.0.0
-   ```
-3. Push to Docker Hub:
-   ```sh
-   docker push yourdockerhubusername/salesforce-tigerpaw:1.0.0
-   ```
-4. Users can then pull and run:
-   ```sh
-   docker run -d -p 5023:5023 yourdockerhubusername/salesforce-tigerpaw:1.0.0
-   ```
-
-## Notes
-- The app runs on port 5023 by default.
-- For Unraid, you can use the Docker Compose file for advanced setups.
-- For updates, tag and push new versions to Docker Hub.
-
-## Versioning & Releases
-- Tag releases in GitHub for major updates (e.g., v1.0.0, v1.1.0).
-- Use semantic versioning for clarity.
-- See CHANGELOG.md for update history.
-
-## Accessibility
-- The web app uses semantic HTML and ARIA attributes for better accessibility.
-- Keyboard navigation and screen reader support are included.
-- If you have accessibility feedback, please open an issue on GitHub.
-
-## Error Logging
-- Errors are logged using Python's logging module.
-- Check server logs for troubleshooting.
-
-## Docker Compose
-- Use `docker-compose up` to run the app with future extensibility.
-
----
-
-## 🤝 Contributing
-Pull requests welcome! For major changes, open an issue first.
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## 📬 Contact & Support
-
-For questions or support, contact Brandon Toth at ASAP Security Services
+Brandon Toth — ASAP Security Services — <Btoth@serviceasap.com>
