@@ -5,9 +5,16 @@ from __future__ import annotations
 import io
 import os
 import sys
+import tempfile
 import unittest
 
 import pandas as pd
+
+# Point the app at a fresh on-disk DB before import so tests don't share state
+# with whatever ran last on this machine.
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="forge-test-")
+os.environ["FORGE_DATA_DIR"] = _TEST_DATA_DIR
+os.environ.setdefault("ADMIN_PASSWORD", "testpw")
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -270,6 +277,77 @@ class UploadLimitTests(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 413)
         self.assertIn("error", r.get_json())
+
+
+class IdentifyAndAdminTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def _login(self):
+        r = self.client.post("/admin/login", data={"password": "testpw"})
+        self.assertIn(r.status_code, (302, 303))
+
+    def test_identify_creates_user_and_event(self):
+        r = self.client.post(
+            "/api/identify",
+            json={"name": "Brandon T.", "firstTime": True},
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh) Chrome/120"},
+        )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["name"], "Brandon T.")
+        self.assertTrue(body["ok"])
+
+    def test_admin_routes_require_login(self):
+        r = self.client.get("/admin/api/stats")
+        self.assertEqual(r.status_code, 401)
+        r2 = self.client.get("/admin")
+        self.assertEqual(r2.status_code, 302)  # redirect to login
+
+    def test_admin_login_wrong_password(self):
+        r = self.client.post("/admin/login", data={"password": "nope"})
+        self.assertEqual(r.status_code, 401)
+
+    def test_admin_flow_stats_and_events(self):
+        # Perform a convert so there's something to see.
+        csv_bytes = _sample_csv_bytes(rows=2)
+        self.client.post(
+            "/api/convert",
+            data={"file": (io.BytesIO(csv_bytes), "hit.csv")},
+            content_type="multipart/form-data",
+            headers={"X-User-Name": "Tester", "User-Agent": "Mozilla/5.0 Chrome/120"},
+        )
+        self._login()
+        stats = self.client.get("/admin/api/stats").get_json()
+        self.assertGreaterEqual(stats["totalEvents"], 1)
+        self.assertGreaterEqual(stats["totalUsers"], 1)
+
+        events = self.client.get("/admin/api/events?limit=5").get_json()
+        self.assertTrue(any(e["type"] == "convert" for e in events["events"]))
+
+        users = self.client.get("/admin/api/users").get_json()
+        tester = next((u for u in users["users"] if u["name"] == "Tester"), None)
+        self.assertIsNotNone(tester)
+        self.assertGreaterEqual(tester["eventCount"], 1)
+
+        detail = self.client.get(f"/admin/api/user/{tester['id']}").get_json()
+        self.assertEqual(detail["user"]["name"], "Tester")
+        self.assertTrue(len(detail["events"]) >= 1)
+
+    def test_reset_wipes_telemetry(self):
+        self._login()
+        # Generate an event
+        self.client.post(
+            "/api/convert",
+            data={"file": (io.BytesIO(_sample_csv_bytes()), "hit.csv")},
+            content_type="multipart/form-data",
+            headers={"X-User-Name": "ToDelete"},
+        )
+        r = self.client.post("/admin/api/reset")
+        self.assertEqual(r.status_code, 200)
+        stats = self.client.get("/admin/api/stats").get_json()
+        self.assertEqual(stats["totalUsers"], 0)
+        self.assertEqual(stats["totalEvents"], 0)
 
 
 if __name__ == "__main__":

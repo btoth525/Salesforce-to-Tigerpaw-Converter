@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-04-21
+### Added
+- **Admin panel at `/admin`** (password-gated via `ADMIN_PASSWORD`) with stat cards, 24-hour activity chart, live auto-refreshing event feed, device/OS/browser breakdowns, user table with active-now indicator, per-user drill-down modal, and a "Reset data" button.
+- **User identification**: first-visit modal captures the user's name (skippable → "Guest"), stored in `localStorage` and sent as `X-User-Name` on every API request. Top-bar chip shows the current user and opens the rename modal.
+- **Event logging** to SQLite at `/app/data/forge.db`: preview / convert / convert_edited / convert_batch / identify are recorded with user name, IP, User-Agent, and timestamped details (filename, row counts).
+- **User-agent parsing** (no external deps): Browser / OS / Device classification for each event.
+- Admin JSON endpoints: `GET /admin/api/{stats, users, user/<id>, events}`, `POST /admin/api/reset`.
+- Docker: `/app/data` volume declared, `ADMIN_PASSWORD` env var with fail-fast in production, `FORGE_DATA_DIR` override, `templates/` copied into the runtime image.
+### Changed
+- `docker-compose.yml` now mounts `./data:/app/data` and requires `ADMIN_PASSWORD` at boot.
+- 8 new integration tests covering identify, admin auth, stats/events/users, user detail, and reset. 28/28 pass.
+
 ## [1.2.0] - 2026-04-21
 ### Added
 - **Command palette** (`⌘K` / `Ctrl+K`): searchable, contextual overlay listing every action for the current stage (download, revert edits, toggle theme, switch tabs, clear filter, remove file, etc.). Arrow keys navigate, Enter runs, Esc closes.

@@ -10,6 +10,10 @@ services:
     environment:
       - FLASK_ENV=production
       - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY in .env or environment}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env or environment}
+    volumes:
+      # Persist users + events across container restarts and upgrades.
+      - ./data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5023/api/health"]

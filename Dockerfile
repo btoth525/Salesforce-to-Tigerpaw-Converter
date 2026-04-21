@@ -16,7 +16,8 @@ LABEL org.opencontainers.image.source="https://github.com/btoth525/Salesforce-to
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=5023
+    PORT=5023 \
+    FORGE_DATA_DIR=/app/data
 
 WORKDIR /app
 
@@ -28,11 +29,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY SalesforceToTigerpaw.py ./
+COPY templates/ ./templates/
 COPY --from=frontend /frontend/dist ./frontend/dist
 
 RUN useradd --system --uid 1001 --create-home appuser \
+ && mkdir -p /app/data \
  && chown -R appuser:appuser /app
 USER appuser
+
+VOLUME ["/app/data"]
 
 EXPOSE 5023
 

@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin · CSV Forge</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <style>{% include "_admin_css.html" %}</style>
+</head>
+<body>
+  <nav class="admin-nav">
+    <div class="admin-brand">
+      <img src="/favicon.png" alt="" />
+      <span>CSV Forge</span><span class="badge">ADMIN</span>
+    </div>
+    <div class="admin-nav-actions">
+      <a class="nav-btn" href="/" title="Back to app">← App</a>
+      <button class="nav-btn danger" id="btn-reset" title="Delete all telemetry">Reset data</button>
+      <form method="post" action="{{ url_for('admin_logout') }}">
+        <button class="nav-btn" type="submit">Log out</button>
+      </form>
+    </div>
+  </nav>
+
+  <main class="admin-main">
+    <section class="stats-row" id="stats-row">
+      <div class="stat-card"><div class="v" data-stat="totalUsers">—</div><div class="l">Total users</div></div>
+      <div class="stat-card live"><div class="v" data-stat="activeUsers">—</div><div class="l">Active now (last 5 min)</div></div>
+      <div class="stat-card"><div class="v" data-stat="eventsToday">—</div><div class="l">Events today</div></div>
+      <div class="stat-card"><div class="v" data-stat="totalEvents">—</div><div class="l">Total events</div></div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>Activity — last 24 hours</span>
+        <span class="hint">one bar per hour, now on the right</span>
+      </div>
+      <div class="chart">
+        <div class="chart-bars" id="chart-bars"></div>
+      </div>
+    </section>
+
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-title">
+          <span>Live event feed</span>
+          <span class="hint">auto-refreshing · newest first</span>
+        </div>
+        <div class="event-feed" id="event-feed">
+          <div class="empty">Loading…</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title"><span>Device & OS breakdown</span><span class="hint">last 7 days</span></div>
+        <div class="breakdown" id="breakdown-devices"></div>
+        <div class="card-title"><span>Browsers</span></div>
+        <div class="breakdown" id="breakdown-browsers"></div>
+        <div class="card-title"><span>Operating systems</span></div>
+        <div class="breakdown" id="breakdown-oses"></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="card-title"><span>Users</span><span class="hint">click a row to see their history</span></div>
+      <div class="scroll-250">
+        <table class="tbl">
+          <thead><tr><th></th><th>Name</th><th>Events</th><th>Last seen</th><th>First seen</th><th>Device</th><th>IP</th></tr></thead>
+          <tbody id="users-tbody"><tr><td class="empty" colspan="7">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal-mount"></div>
+
+  <script>
+    const REFRESH_MS = 5000;
+
+    async function fetchJSON(url, opts) {
+      const r = await fetch(url, opts);
+      if (!r.ok) throw new Error(`${url}: ${r.status}`);
+      return r.json();
+    }
+
+    function fmtRel(iso) {
+      const t = new Date(iso).getTime();
+      const diff = Math.max(0, Date.now() - t);
+      const s = Math.floor(diff / 1000);
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h ago`;
+      return `${Math.floor(h / 24)}d ago`;
+    }
+    function fmtAbs(iso) {
+      return new Date(iso).toLocaleString();
+    }
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function renderStats(data) {
+      for (const k of ['totalUsers','activeUsers','eventsToday','totalEvents']) {
+        const el = document.querySelector(`[data-stat="${k}"]`);
+        if (el) el.textContent = Number(data[k] || 0).toLocaleString();
+      }
+      const max = Math.max(1, ...data.hourly.map((h) => h.count));
+      const bars = document.getElementById('chart-bars');
+      bars.innerHTML = data.hourly.map((h) => {
+        const pct = Math.round((h.count / max) * 100);
+        return `<div class="chart-bar" style="height:${Math.max(2, pct)}%" data-zero="${h.count === 0 ? 1 : 0}" title="${h.count} event${h.count===1?'':'s'}"></div>`;
+      }).join('');
+      renderBreakdown('breakdown-devices', data.devices);
+      renderBreakdown('breakdown-browsers', data.browsers);
+      renderBreakdown('breakdown-oses', data.oses);
+    }
+    function renderBreakdown(id, rows) {
+      const total = rows.reduce((a, r) => a + r.count, 0) || 1;
+      const el = document.getElementById(id);
+      el.innerHTML = rows.length === 0
+        ? `<div class="small muted">No data yet.</div>`
+        : rows.map((r) => {
+            const pct = Math.round((r.count / total) * 100);
+            return `<div class="bd-row"><span class="bd-name">${escapeHtml(r.name)}</span><span class="bd-bar"><span style="width:${pct}%"></span></span><span class="bd-count">${r.count}</span></div>`;
+          }).join('');
+    }
+
+    function renderEvents(events) {
+      const feed = document.getElementById('event-feed');
+      if (!events.length) {
+        feed.innerHTML = `<div class="empty">No events yet — have someone use the app.</div>`;
+        return;
+      }
+      feed.innerHTML = events.map((e) => {
+        const d = e.details || {};
+        let detail;
+        if (e.type === 'convert' || e.type === 'preview' || e.type === 'convert_edited') {
+          detail = `<code>${escapeHtml(d.filename || '?')}</code> · ${d.rows ?? '?'} rows`;
+        } else if (e.type === 'convert_batch') {
+          detail = `<code>${d.files ?? '?'} files</code> · ${d.ok ?? '?'} ok, ${d.failed ?? 0} failed`;
+        } else if (e.type === 'identify') {
+          detail = d.firstTime ? 'first visit' : 'returning';
+        } else {
+          detail = escapeHtml(JSON.stringify(d));
+        }
+        return `
+          <div class="event-row">
+            <span class="event-pill" data-type="${escapeHtml(e.type)}">${escapeHtml(e.type)}</span>
+            <div>
+              <strong>${escapeHtml(e.userName)}</strong> · <span class="event-details">${detail}</span>
+              <div class="event-meta">${escapeHtml(e.browser)} on ${escapeHtml(e.os)} · ${escapeHtml(e.ip || '')}</div>
+            </div>
+            <span class="event-meta" title="${escapeHtml(fmtAbs(e.createdAt))}">${fmtRel(e.createdAt)}</span>
+          </div>`;
+      }).join('');
+    }
+
+    function renderUsers(users) {
+      const tbody = document.getElementById('users-tbody');
+      if (!users.length) {
+        tbody.innerHTML = `<tr><td class="empty" colspan="7">No users yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = users.map((u) => `
+        <tr class="clickable" data-user-id="${u.id}">
+          <td><span class="badge-dot ${u.active ? 'active' : ''}"></span></td>
+          <td>${escapeHtml(u.name)}</td>
+          <td>${u.eventCount}</td>
+          <td title="${escapeHtml(fmtAbs(u.lastSeen))}">${fmtRel(u.lastSeen)}</td>
+          <td class="small muted" title="${escapeHtml(fmtAbs(u.firstSeen))}">${fmtRel(u.firstSeen)}</td>
+          <td class="small muted">${escapeHtml(u.device)} · ${escapeHtml(u.browser)} · ${escapeHtml(u.os)}</td>
+          <td class="small muted">${escapeHtml(u.lastIp || '')}</td>
+        </tr>`).join('');
+      tbody.querySelectorAll('[data-user-id]').forEach((row) => {
+        row.addEventListener('click', () => showUserModal(row.dataset.userId));
+      });
+    }
+
+    async function showUserModal(id) {
+      const mount = document.getElementById('modal-mount');
+      mount.innerHTML = `<div class="modal-backdrop"><div class="modal-card"><div class="modal-header"><div><h2>Loading…</h2></div><button class="modal-close">✕</button></div><div class="modal-body"><div class="empty">Fetching events…</div></div></div></div>`;
+      mount.querySelector('.modal-backdrop').addEventListener('click', (e) => { if (e.target === e.currentTarget) mount.innerHTML = ''; });
+      mount.querySelector('.modal-close').addEventListener('click', () => mount.innerHTML = '');
+      try {
+        const data = await fetchJSON(`/admin/api/user/${id}`);
+        const u = data.user;
+        const events = data.events;
+        mount.innerHTML = `
+          <div class="modal-backdrop">
+            <div class="modal-card">
+              <div class="modal-header">
+                <div>
+                  <h2>${escapeHtml(u.name)}</h2>
+                  <div class="sub">${u.eventCount} events · first seen ${fmtRel(u.firstSeen)} · last IP ${escapeHtml(u.lastIp || '—')}</div>
+                </div>
+                <button class="modal-close">✕</button>
+              </div>
+              <div class="modal-body event-feed" style="max-height: none;">
+                ${events.length === 0
+                  ? '<div class="empty">No events recorded yet for this user.</div>'
+                  : events.map((e) => {
+                      const d = e.details || {};
+                      const detail = (e.type === 'convert_batch'
+                        ? `${d.files ?? '?'} files · ${d.ok ?? '?'} ok, ${d.failed ?? 0} failed`
+                        : (d.filename ? `<code>${escapeHtml(d.filename)}</code> · ${d.rows ?? '?'} rows` : escapeHtml(JSON.stringify(d))));
+                      return `<div class="event-row">
+                        <span class="event-pill" data-type="${escapeHtml(e.type)}">${escapeHtml(e.type)}</span>
+                        <div><span class="event-details">${detail}</span><div class="event-meta">${escapeHtml(e.ip || '')}</div></div>
+                        <span class="event-meta" title="${escapeHtml(fmtAbs(e.createdAt))}">${fmtRel(e.createdAt)}</span>
+                      </div>`;
+                    }).join('')}
+              </div>
+            </div>
+          </div>`;
+        mount.querySelector('.modal-backdrop').addEventListener('click', (e) => { if (e.target === e.currentTarget) mount.innerHTML = ''; });
+        mount.querySelector('.modal-close').addEventListener('click', () => mount.innerHTML = '');
+      } catch (err) {
+        mount.querySelector('.modal-body').innerHTML = `<div class="empty">Error: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function refresh() {
+      try {
+        const [stats, events, users] = await Promise.all([
+          fetchJSON('/admin/api/stats'),
+          fetchJSON('/admin/api/events?limit=50'),
+          fetchJSON('/admin/api/users'),
+        ]);
+        renderStats(stats);
+        renderEvents(events.events);
+        renderUsers(users.users);
+      } catch (err) {
+        console.error('refresh failed', err);
+        if (err.message && err.message.includes('401')) {
+          window.location.href = '/admin/login';
+        }
+      }
+    }
+
+    document.getElementById('btn-reset').addEventListener('click', async () => {
+      if (!confirm('Delete ALL telemetry (users + events)? This cannot be undone.')) return;
+      try {
+        await fetchJSON('/admin/api/reset', { method: 'POST' });
+        refresh();
+      } catch (err) {
+        alert(`Reset failed: ${err.message}`);
+      }
+    });
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>
