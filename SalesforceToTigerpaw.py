@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import secrets
+import time
 import zipfile
 
 import chardet
@@ -69,7 +70,6 @@ REACT_ASSETS_DIR = os.path.join(REACT_BUILD_DIR, "assets")
 app = Flask(__name__, static_folder=REACT_ASSETS_DIR, static_url_path="/assets")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
-_default_secret = "PLEASE_CHANGE_ME_SECRET_KEY"
 _secret = os.environ.get("SECRET_KEY")
 if not _secret:
     if os.environ.get("FLASK_ENV") == "production":
@@ -79,6 +79,47 @@ app.config["SECRET_KEY"] = _secret
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("SalesforceToTigerpaw")
+
+
+@app.before_request
+def _log_start() -> None:
+    request.environ["_start_time"] = time.perf_counter()
+
+
+@app.after_request
+def _log_end(response: Response) -> Response:
+    start = request.environ.get("_start_time")
+    ms = f"{(time.perf_counter() - start) * 1000:.1f}ms" if start else "?"
+    # Skip noisy polling traffic (Unraid / healthcheck hit /api/health every 30s).
+    if request.path != "/api/health":
+        logger.info(
+            "%s %s -> %s (%s)",
+            request.method,
+            request.path,
+            response.status_code,
+            ms,
+        )
+    return response
+
+
+def _safe_static_path(req_path: str) -> str | None:
+    """Resolve a request path under REACT_BUILD_DIR, refusing anything outside.
+
+    Returns an absolute path on success, ``None`` if the request is either
+    empty, tries to traverse out of the build directory, or doesn't resolve
+    to an existing file.
+    """
+    if not req_path:
+        return None
+    base = os.path.realpath(REACT_BUILD_DIR)
+    candidate = os.path.realpath(os.path.join(base, req_path))
+    try:
+        if os.path.commonpath([base, candidate]) != base:
+            return None
+    except ValueError:
+        # commonpath raises on mixed drive letters / empty; treat as unsafe.
+        return None
+    return candidate if os.path.isfile(candidate) else None
 
 
 # --- CSV pipeline ------------------------------------------------------------
@@ -324,9 +365,15 @@ def health_route():
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_spa(path: str):
-    """Serve the React SPA, falling back to index.html for client-side routes."""
-    if path and os.path.exists(os.path.join(REACT_BUILD_DIR, path)):
-        return send_from_directory(REACT_BUILD_DIR, path)
+    """Serve the React SPA, falling back to index.html for client-side routes.
+
+    Any path that resolves outside ``REACT_BUILD_DIR`` (e.g. traversal attempts
+    via ``..``) falls through to the SPA fallback rather than leaking files.
+    """
+    safe = _safe_static_path(path)
+    if safe:
+        rel = os.path.relpath(safe, REACT_BUILD_DIR)
+        return send_from_directory(REACT_BUILD_DIR, rel)
     index_path = os.path.join(REACT_BUILD_DIR, "index.html")
     if not os.path.exists(index_path):
         return jsonify({"error": "Frontend not built. Run `npm run build` in frontend/."}), 503
