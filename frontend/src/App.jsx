@@ -114,6 +114,30 @@ function openFilePicker(onFiles) {
   input.click();
 }
 
+// --- Identity ---------------------------------------------------------------
+// `apiFetch` wraps fetch() to attach the current user's name as a header on
+// every request. Backend uses it to track who did what.
+
+const USER_KEY = 'csv-forge-user';
+
+function getUserName() {
+  try { return localStorage.getItem(USER_KEY) || ''; } catch { return ''; }
+}
+
+function setUserName(name) {
+  try {
+    if (name) localStorage.setItem(USER_KEY, name);
+    else localStorage.removeItem(USER_KEY);
+  } catch { /* ignore quota / private mode */ }
+}
+
+async function apiFetch(url, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const name = getUserName();
+  if (name) headers.set('X-User-Name', name);
+  return fetch(url, { ...opts, headers });
+}
+
 function App() {
   const [stage, setStage] = useState(STAGES.IDLE);
   const [file, setFile] = useState(null);
@@ -128,12 +152,40 @@ function App() {
   const [dragActive, setDragActive] = useState(false);
   const [editedRows, setEditedRows] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [userName, setUserNameState] = useState(() => getUserName());
+  const [showNamePrompt, setShowNamePrompt] = useState(() => !getUserName());
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  // Tell the backend who we are on first visit (or whenever name changes).
+  useEffect(() => {
+    if (!userName) return;
+    const firstTime = !sessionStorage.getItem('csv-forge-identified');
+    apiFetch('/api/identify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: userName, firstTime }),
+    }).catch(() => { /* identify is best-effort */ });
+    sessionStorage.setItem('csv-forge-identified', '1');
+  }, [userName]);
+
+  const saveUserName = useCallback((name) => {
+    const cleaned = (name || '').trim();
+    if (!cleaned) {
+      setUserName('');
+      setUserNameState('');
+      setShowNamePrompt(true);
+      return;
+    }
+    setUserName(cleaned);
+    setUserNameState(cleaned);
+    setShowNamePrompt(false);
+    pushToast('success', `Hi, ${cleaned}!`);
+  }, [pushToast]);
 
   const reset = useCallback(() => {
     setStage(STAGES.IDLE);
@@ -155,7 +207,7 @@ function App() {
     try {
       const fd = new FormData();
       fd.append('file', f);
-      const res = await fetch('/api/preview', { method: 'POST', body: fd });
+      const res = await apiFetch('/api/preview', { method: 'POST', body: fd });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || 'Preview failed.');
       setPreview(body);
@@ -231,7 +283,7 @@ function App() {
     try {
       const fd = new FormData();
       fd.append('file', file);
-      const res = await fetch('/api/convert', { method: 'POST', body: fd });
+      const res = await apiFetch('/api/convert', { method: 'POST', body: fd });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || 'Conversion failed.');
@@ -253,7 +305,7 @@ function App() {
     setBusy(true);
     try {
       const outName = file.name.replace(/\.csv$/i, '_edited.csv');
-      const res = await fetch('/api/convert-edited', {
+      const res = await apiFetch('/api/convert-edited', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -282,7 +334,7 @@ function App() {
     try {
       const fd = new FormData();
       for (const f of batchFiles) fd.append('files', f);
-      const res = await fetch('/api/convert-batch', { method: 'POST', body: fd });
+      const res = await apiFetch('/api/convert-batch', { method: 'POST', body: fd });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || 'Batch conversion failed.');
@@ -404,6 +456,13 @@ function App() {
       keywords: 'keys help',
       perform: () => setShowHelp(true),
     });
+    cmds.push({
+      id: 'name',
+      title: userName ? `Change name (currently: ${userName})` : 'Set your name',
+      group: 'Profile',
+      keywords: 'identity user who me',
+      perform: () => setShowNamePrompt(true),
+    });
     if (stage === STAGES.IDLE) {
       cmds.push({
         id: 'browse',
@@ -491,7 +550,7 @@ function App() {
       });
     }
     return cmds;
-  }, [theme, stage, dirty, query, handleFiles, doConvert, doConvertEdited, doConvertBatch, revertEdits, reset]);
+  }, [theme, stage, dirty, query, userName, handleFiles, doConvert, doConvertEdited, doConvertBatch, revertEdits, reset]);
 
   return (
     <div className="app" data-stage={stage}>
@@ -501,6 +560,8 @@ function App() {
         onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         onHelp={() => setShowHelp(true)}
         onCmd={() => setShowCmd(true)}
+        userName={userName}
+        onChangeName={() => setShowNamePrompt(true)}
       />
       <main className="shell">
         <header className="hero">
@@ -561,11 +622,19 @@ function App() {
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {showCmd && <CommandPalette commands={commands} onClose={() => setShowCmd(false)} />}
       {dragActive && <DragVeil active={stage === STAGES.IDLE} />}
+      {showNamePrompt && (
+        <NameModal
+          initialValue={userName}
+          allowSkip={!!userName}
+          onSave={saveUserName}
+          onSkip={() => setShowNamePrompt(false)}
+        />
+      )}
     </div>
   );
 }
 
-function TopBar({ theme, onToggleTheme, onHelp, onCmd }) {
+function TopBar({ theme, onToggleTheme, onHelp, onCmd, userName, onChangeName }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -573,6 +642,12 @@ function TopBar({ theme, onToggleTheme, onHelp, onCmd }) {
         <span>CSV Forge</span>
       </div>
       <div className="topbar-actions">
+        {userName && (
+          <button className="user-chip" onClick={onChangeName} title="Change name">
+            <span className="user-chip-dot" aria-hidden="true">{userName.charAt(0).toUpperCase()}</span>
+            <span className="user-chip-name">{userName}</span>
+          </button>
+        )}
         <button className="cmd-hint" onClick={onCmd} title="Command palette (⌘/Ctrl+K)">
           <SearchIcon />
           <span>Quick actions</span>
@@ -584,6 +659,43 @@ function TopBar({ theme, onToggleTheme, onHelp, onCmd }) {
         <button className="icon-btn" onClick={onToggleTheme} aria-label="Toggle theme" title="Toggle theme">
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>
+      </div>
+    </div>
+  );
+}
+
+function NameModal({ initialValue, allowSkip, onSave, onSkip }) {
+  const [value, setValue] = useState(initialValue || '');
+  const trapRef = useFocusTrap(true);
+  return (
+    <div className="name-backdrop" onClick={allowSkip ? onSkip : undefined}>
+      <div ref={trapRef} className="name-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Enter your name">
+        <div className="name-head">
+          <div className="name-title">What's your name?</div>
+          <div className="name-sub">So your teammates know who converted what. Stored on this browser only.</div>
+        </div>
+        <form
+          className="name-form"
+          onSubmit={(e) => { e.preventDefault(); onSave(value); }}
+        >
+          <input
+            className="name-input"
+            autoFocus
+            maxLength={60}
+            placeholder="e.g. Brandon T."
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <div className="name-actions">
+            {allowSkip && (
+              <button type="button" className="btn ghost" onClick={onSkip}>Cancel</button>
+            )}
+            {!allowSkip && (
+              <button type="button" className="btn ghost" onClick={() => onSave('Guest')}>Skip (use Guest)</button>
+            )}
+            <button type="submit" className="btn primary" disabled={!value.trim()}>Save</button>
+          </div>
+        </form>
       </div>
     </div>
   );

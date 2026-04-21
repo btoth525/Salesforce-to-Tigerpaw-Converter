@@ -593,6 +593,74 @@ kbd {
   font-weight: 700;
 }
 
+/* ---- Top-bar user chip ---- */
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.7rem 0.3rem 0.35rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.user-chip:hover { background: var(--surface-strong); border-color: var(--border-strong); transform: translateY(-1px); }
+.user-chip-dot {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: inline-grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0b1020;
+  font-weight: 800;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+.user-chip-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .user-chip-name { display: none; } }
+
+/* ---- Name modal ---- */
+.name-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(4,8,20,0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1050;
+  display: grid; place-items: center;
+  padding: 1rem;
+  animation: fadeBg 0.2s ease-out;
+}
+[data-theme='light'] .name-backdrop { background: rgba(170,180,220,0.6); }
+.name-panel {
+  width: 100%;
+  max-width: 440px;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px);
+  animation: cmdPop 0.22s cubic-bezier(0.2, 0.8, 0.2, 1.1) both;
+}
+.name-title { font-size: 1.2rem; font-weight: 800; margin-bottom: 0.25rem; }
+.name-sub { color: var(--text-dim); font-size: 0.88rem; margin-bottom: 1rem; }
+.name-form { display: flex; flex-direction: column; gap: 0.75rem; }
+.name-input {
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.name-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,0.18); }
+.name-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+
 /* ---- Top-bar "quick actions" chip ---- */
 .cmd-hint {
   display: inline-flex;

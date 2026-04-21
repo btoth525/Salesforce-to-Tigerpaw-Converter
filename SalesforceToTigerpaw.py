@@ -7,16 +7,34 @@ Flask app exposing JSON APIs under ``/api/*`` and serving the React SPA from
 from __future__ import annotations
 
 import io
+import json
 import logging
 import math
 import os
+import re
 import secrets
+import sqlite3
 import time
 import zipfile
+from datetime import datetime, timezone
+from functools import wraps
 
 import chardet
 import pandas as pd
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import (
+    Flask,
+    Response,
+    abort,
+    g,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -62,12 +80,25 @@ PREVIEW_ROWS = 500  # enough to cover typical quote exports end-to-end
 ENCODING_SNIFF_BYTES = 64 * 1024
 BATCH_MAX_FILES = 25
 
+# --- Admin / telemetry -------------------------------------------------------
+
+DATA_DIR = os.environ.get("FORGE_DATA_DIR") or os.path.join(os.path.dirname(__file__), "data")
+DB_PATH = os.path.join(DATA_DIR, "forge.db")
+ACTIVE_WINDOW_SECONDS = 5 * 60  # user is "active" if seen in the last N seconds
+ADMIN_SESSION_KEY = "_admin"
+
 
 # --- App ---------------------------------------------------------------------
 
 REACT_BUILD_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 REACT_ASSETS_DIR = os.path.join(REACT_BUILD_DIR, "assets")
-app = Flask(__name__, static_folder=REACT_ASSETS_DIR, static_url_path="/assets")
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+app = Flask(
+    __name__,
+    static_folder=REACT_ASSETS_DIR,
+    static_url_path="/assets",
+    template_folder=TEMPLATES_DIR,
+)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 _secret = os.environ.get("SECRET_KEY")
@@ -77,8 +108,188 @@ if not _secret:
     _secret = secrets.token_hex(32)
 app.config["SECRET_KEY"] = _secret
 
+_admin_password = os.environ.get("ADMIN_PASSWORD")
+if not _admin_password:
+    if os.environ.get("FLASK_ENV") == "production":
+        raise RuntimeError("ADMIN_PASSWORD env var must be set in production")
+    _admin_password = "admin"  # dev default only
+app.config["ADMIN_PASSWORD"] = _admin_password
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("SalesforceToTigerpaw")
+
+
+# --- Database ---------------------------------------------------------------
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _db() -> sqlite3.Connection:
+    """Per-request SQLite connection, cached on ``flask.g``."""
+    conn = getattr(g, "_db_conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        g._db_conn = conn
+    return conn
+
+
+@app.teardown_appcontext
+def _close_db(_exc) -> None:
+    conn = getattr(g, "_db_conn", None)
+    if conn is not None:
+        conn.close()
+
+
+def init_db() -> None:
+    """Create tables if they don't exist. Idempotent."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                last_ip TEXT,
+                last_user_agent TEXT,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(name)
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                ip TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+            CREATE INDEX IF NOT EXISTS events_user ON events(user_id);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+init_db()
+
+
+# --- User agent parsing (heuristic, no external deps) ------------------------
+
+
+def parse_user_agent(ua: str) -> dict:
+    """Return ``{browser, os, device}`` from a user-agent string."""
+    if not ua:
+        return {"browser": "Unknown", "os": "Unknown", "device": "Unknown"}
+    ua_l = ua.lower()
+
+    if "edg/" in ua_l: browser = "Edge"
+    elif "opr/" in ua_l or "opera" in ua_l: browser = "Opera"
+    elif "firefox" in ua_l: browser = "Firefox"
+    elif "chrome" in ua_l and "safari" in ua_l: browser = "Chrome"
+    elif "safari" in ua_l: browser = "Safari"
+    elif "curl" in ua_l: browser = "curl"
+    else: browser = "Unknown"
+
+    if "iphone" in ua_l: os_name, device = "iOS", "iPhone"
+    elif "ipad" in ua_l: os_name, device = "iPadOS", "iPad"
+    elif "android" in ua_l:
+        os_name = "Android"
+        device = "Tablet" if "tablet" in ua_l else "Phone"
+    elif "mac os x" in ua_l: os_name, device = "macOS", "Desktop"
+    elif "windows" in ua_l: os_name, device = "Windows", "Desktop"
+    elif "linux" in ua_l: os_name, device = "Linux", "Desktop"
+    else: os_name, device = "Unknown", "Unknown"
+
+    return {"browser": browser, "os": os_name, "device": device}
+
+
+# --- Client identification + event recording --------------------------------
+
+
+_NAME_RE = re.compile(r"[^\w .'\-]+")
+
+
+def _sanitize_name(raw: str | None) -> str:
+    if not raw:
+        return "Guest"
+    cleaned = _NAME_RE.sub("", raw).strip()[:60]
+    return cleaned or "Guest"
+
+
+def _client_ip() -> str:
+    fwd = request.headers.get("X-Forwarded-For")
+    return (fwd.split(",")[0].strip() if fwd else request.remote_addr) or "unknown"
+
+
+def _current_user_name() -> str:
+    return _sanitize_name(request.headers.get("X-User-Name"))
+
+
+def _upsert_user(name: str, ip: str, ua: str) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _db()
+    row = conn.execute("SELECT id FROM users WHERE name = ?", (name,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE users SET last_seen=?, last_ip=?, last_user_agent=? WHERE id=?",
+            (now, ip, ua, row["id"]),
+        )
+        conn.commit()
+        return row["id"]
+    cur = conn.execute(
+        "INSERT INTO users (name, first_seen, last_seen, last_ip, last_user_agent) VALUES (?, ?, ?, ?, ?)",
+        (name, now, now, ip, ua),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def record_event(event_type: str, details: dict | None = None) -> None:
+    """Log an event attributed to the current X-User-Name (or Guest)."""
+    name = _current_user_name()
+    ip = _client_ip()
+    ua = request.headers.get("User-Agent", "")
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = _db()
+        user_id = _upsert_user(name, ip, ua)
+        conn.execute(
+            "INSERT INTO events (user_id, user_name, event_type, details, ip, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, name, event_type, json.dumps(details or {}), ip, ua, now),
+        )
+        conn.execute("UPDATE users SET event_count = event_count + 1 WHERE id = ?", (user_id,))
+        conn.commit()
+    except Exception:
+        # Telemetry failures must never break a user request.
+        logger.exception("Failed to record event %s for %s", event_type, name)
+
+
+# --- Admin auth -------------------------------------------------------------
+
+
+def admin_required(fn):
+    """Gate a view behind the admin session cookie."""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not session.get(ADMIN_SESSION_KEY):
+            if request.path.startswith("/admin/api/"):
+                return jsonify({"error": "Unauthorized"}), 401
+            return redirect(url_for("admin_login"))
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 @app.before_request
@@ -232,6 +443,7 @@ def preview_route():
         return jsonify({"error": str(e)}), 400
 
     row_count = int(len(df))
+    record_event("preview", {"filename": secure_filename(file.filename), "rows": row_count})
     return jsonify(
         {
             "filename": secure_filename(file.filename),
@@ -265,6 +477,7 @@ def convert_route():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    record_event("convert", {"filename": filename, "rows": int(len(df))})
     return Response(
         payload,
         mimetype="text/csv",
@@ -299,6 +512,7 @@ def convert_edited_route():
     payload = dataframe_to_csv_bytes(frame)
     output_filename = filename if filename.endswith(".csv") else filename + ".csv"
 
+    record_event("convert_edited", {"filename": output_filename, "rows": len(rows)})
     return Response(
         payload,
         mimetype="text/csv",
@@ -346,15 +560,258 @@ def convert_batch_route():
             )
             zf.writestr("_errors.txt", summary.encode("utf-8"))
 
+    ok_count = sum(1 for r in results if r["status"] == "ok")
+    record_event(
+        "convert_batch",
+        {"files": len(uploads), "ok": ok_count, "failed": len(uploads) - ok_count},
+    )
     zip_buffer.seek(0)
     return Response(
         zip_buffer.getvalue(),
         mimetype="application/zip",
         headers={
             "Content-Disposition": 'attachment; filename="converted_batch.zip"',
-            "X-Batch-Summary": f"{sum(1 for r in results if r['status']=='ok')}/{len(uploads)} succeeded",
+            "X-Batch-Summary": f"{ok_count}/{len(uploads)} succeeded",
         },
     )
+
+
+@app.route("/api/identify", methods=["POST"])
+def identify_route():
+    """Register / refresh a user by name. Called once per browser on first visit."""
+    body = request.get_json(silent=True) or {}
+    raw = body.get("name") or request.headers.get("X-User-Name")
+    name = _sanitize_name(raw)
+    ip = _client_ip()
+    ua = request.headers.get("User-Agent", "")
+    user_id = _upsert_user(name, ip, ua)
+    record_event("identify", {"first_time": body.get("firstTime", False)})
+    return jsonify({"ok": True, "name": name, "userId": user_id})
+
+
+# --- Admin routes ----------------------------------------------------------
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "GET":
+        if session.get(ADMIN_SESSION_KEY):
+            return redirect(url_for("admin_dashboard"))
+        return render_template("admin_login.html", error=None)
+    submitted = request.form.get("password", "")
+    if secrets.compare_digest(submitted, app.config["ADMIN_PASSWORD"]):
+        session.permanent = True
+        session[ADMIN_SESSION_KEY] = True
+        logger.info("admin login from %s", _client_ip())
+        return redirect(url_for("admin_dashboard"))
+    logger.warning("failed admin login from %s", _client_ip())
+    return render_template("admin_login.html", error="Incorrect password."), 401
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop(ADMIN_SESSION_KEY, None)
+    return redirect(url_for("admin_login"))
+
+
+@app.route("/admin")
+@admin_required
+def admin_dashboard():
+    return render_template("admin.html")
+
+
+@app.route("/admin/api/stats")
+@admin_required
+def admin_stats():
+    conn = _db()
+    now = datetime.now(timezone.utc)
+    active_cutoff = now.timestamp() - ACTIVE_WINDOW_SECONDS
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    total_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    total_events = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    events_today = conn.execute(
+        "SELECT COUNT(*) c FROM events WHERE created_at >= ?", (today_start,)
+    ).fetchone()["c"]
+
+    users = conn.execute("SELECT last_seen FROM users").fetchall()
+    active_users = sum(
+        1 for u in users
+        if _parse_iso(u["last_seen"]).timestamp() >= active_cutoff
+    )
+
+    # Event-type breakdown.
+    types = conn.execute(
+        "SELECT event_type, COUNT(*) c FROM events GROUP BY event_type ORDER BY c DESC"
+    ).fetchall()
+
+    # Hourly activity over the last 24h.
+    hours = [{"hour": h, "count": 0} for h in range(24)]
+    rows = conn.execute(
+        """
+        SELECT created_at FROM events
+        WHERE created_at >= datetime('now', '-24 hours')
+        """
+    ).fetchall()
+    for r in rows:
+        dt = _parse_iso(r["created_at"])
+        # Bucket by "how many hours ago", so 0 is the current hour.
+        delta_hours = int((now - dt).total_seconds() // 3600)
+        if 0 <= delta_hours < 24:
+            hours[23 - delta_hours]["count"] += 1
+
+    # Device breakdown from parsed user-agent on recent events.
+    ua_rows = conn.execute(
+        "SELECT user_agent FROM events WHERE created_at >= datetime('now', '-7 days')"
+    ).fetchall()
+    browsers, oses, devices = {}, {}, {}
+    for r in ua_rows:
+        info = parse_user_agent(r["user_agent"] or "")
+        browsers[info["browser"]] = browsers.get(info["browser"], 0) + 1
+        oses[info["os"]] = oses.get(info["os"], 0) + 1
+        devices[info["device"]] = devices.get(info["device"], 0) + 1
+
+    return jsonify(
+        {
+            "totalUsers": total_users,
+            "activeUsers": active_users,
+            "totalEvents": total_events,
+            "eventsToday": events_today,
+            "activeWindowSeconds": ACTIVE_WINDOW_SECONDS,
+            "eventTypes": [{"type": r["event_type"], "count": r["c"]} for r in types],
+            "hourly": hours,
+            "browsers": [{"name": k, "count": v} for k, v in sorted(browsers.items(), key=lambda x: -x[1])],
+            "oses": [{"name": k, "count": v} for k, v in sorted(oses.items(), key=lambda x: -x[1])],
+            "devices": [{"name": k, "count": v} for k, v in sorted(devices.items(), key=lambda x: -x[1])],
+        }
+    )
+
+
+@app.route("/admin/api/users")
+@admin_required
+def admin_users():
+    conn = _db()
+    now_ts = datetime.now(timezone.utc).timestamp()
+    rows = conn.execute(
+        """
+        SELECT id, name, first_seen, last_seen, last_ip, last_user_agent, event_count
+        FROM users
+        ORDER BY last_seen DESC
+        """
+    ).fetchall()
+    out = []
+    for r in rows:
+        ua = parse_user_agent(r["last_user_agent"] or "")
+        is_active = _parse_iso(r["last_seen"]).timestamp() >= now_ts - ACTIVE_WINDOW_SECONDS
+        out.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "firstSeen": r["first_seen"],
+                "lastSeen": r["last_seen"],
+                "lastIp": r["last_ip"],
+                "eventCount": r["event_count"],
+                "active": is_active,
+                "browser": ua["browser"],
+                "os": ua["os"],
+                "device": ua["device"],
+            }
+        )
+    return jsonify({"users": out})
+
+
+@app.route("/admin/api/user/<int:user_id>")
+@admin_required
+def admin_user_detail(user_id: int):
+    conn = _db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return jsonify({"error": "Not found"}), 404
+    events = conn.execute(
+        """
+        SELECT event_type, details, ip, created_at
+        FROM events
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 50
+        """,
+        (user_id,),
+    ).fetchall()
+    return jsonify(
+        {
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "firstSeen": user["first_seen"],
+                "lastSeen": user["last_seen"],
+                "lastIp": user["last_ip"],
+                "eventCount": user["event_count"],
+            },
+            "events": [
+                {
+                    "type": e["event_type"],
+                    "details": json.loads(e["details"] or "{}"),
+                    "ip": e["ip"],
+                    "createdAt": e["created_at"],
+                }
+                for e in events
+            ],
+        }
+    )
+
+
+@app.route("/admin/api/events")
+@admin_required
+def admin_events():
+    limit = min(int(request.args.get("limit", 100)), 500)
+    conn = _db()
+    rows = conn.execute(
+        """
+        SELECT id, user_id, user_name, event_type, details, ip, user_agent, created_at
+        FROM events
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        ua = parse_user_agent(r["user_agent"] or "")
+        out.append(
+            {
+                "id": r["id"],
+                "userId": r["user_id"],
+                "userName": r["user_name"],
+                "type": r["event_type"],
+                "details": json.loads(r["details"] or "{}"),
+                "ip": r["ip"],
+                "browser": ua["browser"],
+                "os": ua["os"],
+                "device": ua["device"],
+                "createdAt": r["created_at"],
+            }
+        )
+    return jsonify({"events": out})
+
+
+@app.route("/admin/api/reset", methods=["POST"])
+@admin_required
+def admin_reset():
+    """Wipe all telemetry. Irreversible. Admin confirms in the UI."""
+    conn = _db()
+    conn.execute("DELETE FROM events")
+    conn.execute("DELETE FROM users")
+    conn.commit()
+    logger.warning("admin wiped all telemetry from %s", _client_ip())
+    return jsonify({"ok": True})
+
+
+def _parse_iso(s: str) -> datetime:
+    # Handle trailing +00:00 → Z normalization; sqlite stores with timezone.
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
 @app.route("/api/health")

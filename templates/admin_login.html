@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin · CSV Forge</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <style>{% include "_admin_css.html" %}</style>
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="login-logo"><img src="/favicon.png" alt="" /></div>
+    <h1>Admin access</h1>
+    <p class="login-sub">Enter the admin password to view telemetry.</p>
+    {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
+    <form method="post" action="{{ url_for('admin_login') }}">
+      <input type="password" name="password" autofocus placeholder="Password" required />
+      <button type="submit">Sign in</button>
+    </form>
+    <a class="login-back" href="/">← Back to app</a>
+  </main>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Salesforce → Tigerpaw CSV Converter
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
@@ -22,7 +22,8 @@ A production-ready Flask + React web app that turns Salesforce CSV exports into 
 - **Global drop-anywhere** — drag a file over the window and the entire app becomes a drop target.
 - **Toasts, skeleton loader, count-up stats** — the small polish that makes it feel like a $50/month product.
 - **Dark / light themes** with persistence, plus a keyboard help overlay (`?`).
-- **Safe by default** — 10 MB upload cap, encoding sniffed without loading the whole file, fail-fast `SECRET_KEY` in production, non-root container, `/api/health` HEALTHCHECK.
+- **Admin panel at `/admin`** — see who's using it, live event feed, device breakdown, per-user drill-down. Password-gated.
+- **Safe by default** — 10 MB upload cap, encoding sniffed without loading the whole file, fail-fast `SECRET_KEY` + `ADMIN_PASSWORD` in production, directory-traversal protection, non-root container, `/api/health` HEALTHCHECK.
 
 ---
 
@@ -80,6 +81,73 @@ Every element has light-theme styling. Theme preference is persisted to `localSt
 
 Press `?` anywhere for the shortcut cheatsheet.
 
+### Name prompt + user chip
+
+![Name modal](docs/screenshots/11-name-modal.png)
+
+First-visit modal asks for a name (skippable → "Guest"). Stored in
+`localStorage` and sent as `X-User-Name` on every API request so the admin
+panel can attribute activity. The name shows as a chip in the top bar —
+click it to change or clear.
+
+---
+
+## Admin panel
+
+`/admin` is password-gated via the `ADMIN_PASSWORD` env var. Telemetry
+persists in a SQLite file at `/app/data/forge.db` (mount a volume in
+production).
+
+![Admin dashboard](docs/screenshots/14-admin-dashboard.png)
+
+- **Stat cards** — total users, active now (pulsing dot if anyone's used
+  the app in the last 5 minutes), events today, total events.
+- **Activity chart** — one bar per hour for the last 24 hours, "now" on
+  the right.
+- **Live event feed** — auto-refreshes every 5 seconds, color-coded pills
+  per event type (`identify`, `preview`, `convert`, `convert_edited`,
+  `convert_batch`), filename + row count + device + IP + relative time.
+- **Device / OS / browser breakdowns** — the last 7 days, with percent bars.
+- **User table** — active-now green dot, event count, last seen, first
+  seen, device fingerprint, last IP. Click any row for the drill-down.
+
+![Admin user detail](docs/screenshots/15-admin-user-detail.png)
+
+Click a user to see their last 50 events in detail.
+
+**Actions:**
+- **Reset data** (top right) — wipes every user + event. Confirm prompt first.
+- **Log out** — clears the admin session cookie.
+
+### Admin login
+
+![Admin login](docs/screenshots/13-admin-login.png)
+
+### Admin API
+
+All admin JSON endpoints require the session cookie set by `/admin/login`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`  | `/admin` | Dashboard HTML |
+| `GET/POST` | `/admin/login` | Password form + submit |
+| `POST` | `/admin/logout` | Clear session |
+| `GET`  | `/admin/api/stats` | Summary + hourly activity + device/OS/browser breakdowns |
+| `GET`  | `/admin/api/users` | All users, newest `last_seen` first |
+| `GET`  | `/admin/api/user/<id>` | Single user + last 50 events |
+| `GET`  | `/admin/api/events?limit=N` | Recent events (newest first, max 500) |
+| `POST` | `/admin/api/reset` | Wipe all telemetry |
+
+### Privacy
+
+- Data is stored locally in SQLite; nothing leaves the container.
+- No geolocation by default (IP is logged but not resolved to a location).
+  IPs behind `X-Forwarded-For` (Unraid's reverse proxy, etc.) are captured
+  as the first hop — set `FLASK_TRUSTED_HOSTS` if you need stricter.
+- `localStorage` holds the user's name only on their browser.
+- `docker exec -it salesforce-to-tigerpaw sqlite3 /app/data/forge.db` gets
+  you a direct prompt if you need to query or delete specific rows.
+
 ---
 
 ## Keyboard shortcuts
@@ -110,7 +178,9 @@ ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
 | **Network Type** | `Bridge` |
 | **WebUI** | `http://[IP]:[PORT:5023]/` |
 | **Port** — WebUI | Container `5023` → Host `5023` (TCP) |
+| **Path** — data | Host `/mnt/user/appdata/salesforce-to-tigerpaw/` → Container `/app/data` |
 | **Variable** — `SECRET_KEY` | *any long random string*, e.g. `openssl rand -hex 32` |
+| **Variable** — `ADMIN_PASSWORD` | password for the `/admin` dashboard |
 | **Variable** — `FLASK_ENV` | `production` |
 
 ### Docker CLI
@@ -120,7 +190,9 @@ docker run -d \
   --name salesforce-to-tigerpaw \
   -p 5023:5023 \
   -e SECRET_KEY="$(openssl rand -hex 32)" \
+  -e ADMIN_PASSWORD="your-admin-password" \
   -e FLASK_ENV=production \
+  -v /mnt/user/appdata/salesforce-to-tigerpaw:/app/data \
   --restart unless-stopped \
   ghcr.io/btoth525/salesforce-to-tigerpaw-converter:latest
 ```
@@ -212,8 +284,10 @@ Required columns are enforced; if any of the five source columns are missing, th
 | Env var | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `SECRET_KEY` | yes in prod | random per-process in dev | Startup **fails** if `FLASK_ENV=production` and this is unset. |
+| `ADMIN_PASSWORD` | yes in prod | `admin` in dev | Password for `/admin`. Startup fails in production if unset. |
 | `FLASK_ENV` | no | unset | Set to `production` for the prod check. |
 | `PORT` | no | `5023` | Gunicorn bind port inside the container. |
+| `FORGE_DATA_DIR` | no | `/app/data` (container) or `./data` (dev) | Where `forge.db` (SQLite telemetry) lives. Mount a volume here in production. |
 
 ---
 
