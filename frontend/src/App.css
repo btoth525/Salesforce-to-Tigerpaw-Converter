@@ -829,6 +829,49 @@ kbd {
   to   { transform: translateX(100%); }
 }
 .spinner.sm { width: 18px; height: 18px; border-width: 2px; }
+.spinner.sm.inline {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border-width: 2px;
+  vertical-align: -2px;
+  margin-right: 0.35rem;
+}
+.btn:disabled { opacity: 0.65; cursor: not-allowed; transform: none !important; box-shadow: var(--shadow-md); }
+.btn:disabled:hover { transform: none; }
+
+/* ---- Crash / error boundary fallback ---- */
+.crash {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  padding: 1rem;
+}
+.crash-card {
+  max-width: 520px;
+  width: 100%;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--danger);
+  border-radius: 14px;
+  padding: 1.5rem 1.5rem 1.25rem;
+  box-shadow: var(--shadow-lg);
+}
+.crash-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 0.75rem; }
+.crash-msg {
+  font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  background: var(--surface);
+  padding: 0.75rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
 
 /* ---- Dirty-edit indicator ---- */
 .dirty-dot {

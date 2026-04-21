@@ -240,6 +240,37 @@ class SpaRouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json(), {"status": "ok"})
 
+    def test_traversal_attempt_falls_back_to_spa_or_503(self):
+        # A path that tries to escape the build dir must not leak /etc/passwd
+        # or any other file. The expected behavior is the SPA fallback (200
+        # index.html) or 503 if the frontend isn't built — never a 200 with
+        # the traversal target's contents.
+        r = self.client.get("/../../etc/passwd")
+        self.assertIn(r.status_code, (200, 404, 503))
+        self.assertNotIn(b"root:", r.data)
+
+    def test_encoded_traversal_attempt_is_safe(self):
+        r = self.client.get("/%2e%2e/%2e%2e/etc/passwd")
+        self.assertIn(r.status_code, (200, 404, 503))
+        self.assertNotIn(b"root:", r.data)
+
+
+class UploadLimitTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_oversize_upload_returns_413(self):
+        # MAX_CONTENT_LENGTH is 10 MB; 11 MB of junk should be rejected before
+        # we even parse the CSV.
+        big = io.BytesIO(b"a,b,c\n" + b"0," * (11 * 1024 * 1024 // 2))
+        r = self.client.post(
+            "/api/convert",
+            data={"file": (big, "big.csv")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r.status_code, 413)
+        self.assertIn("error", r.get_json())
+
 
 if __name__ == "__main__":
     unittest.main()

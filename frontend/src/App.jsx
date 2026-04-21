@@ -1,7 +1,74 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
 const STAGES = { IDLE: 'idle', LOADING: 'loading', PREVIEW: 'preview', BATCH: 'batch', DONE: 'done' };
+
+// --- Error boundary ---------------------------------------------------------
+// Catches render/commit errors anywhere in the tree so a crash shows a helpful
+// fallback instead of a blank page.
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    // Log to console; in a bigger app this would hit Sentry or similar.
+    console.error('UI crash', error, info);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="crash">
+        <div className="crash-card">
+          <div className="crash-title">Something went wrong rendering the app.</div>
+          <pre className="crash-msg">{String(this.state.error?.message || this.state.error)}</pre>
+          <button className="btn primary" onClick={() => location.reload()}>Reload</button>
+        </div>
+      </div>
+    );
+  }
+}
+
+// --- Focus trap -------------------------------------------------------------
+// Keeps Tab / Shift+Tab inside a container so keyboard users can't escape a
+// modal. Also focuses the first tabbable child on mount.
+function useFocusTrap(active) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!active || !ref.current) return;
+    const root = ref.current;
+    const sel = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusables = () => Array.from(root.querySelectorAll(sel)).filter((el) => !el.hasAttribute('hidden'));
+
+    const prev = document.activeElement;
+    const first = focusables()[0];
+    first?.focus();
+
+    const onKey = (e) => {
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (items.length === 0) return;
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault();
+        lastEl.focus();
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault();
+        firstEl.focus();
+      }
+    };
+    root.addEventListener('keydown', onKey);
+    return () => {
+      root.removeEventListener('keydown', onKey);
+      if (prev && prev.focus) prev.focus();
+    };
+  }, [active]);
+  return ref;
+}
 
 // --- Toast system (lifted here to avoid a provider; single user of the app) -
 let toastId = 0;
@@ -60,6 +127,7 @@ function App() {
   const [showCmd, setShowCmd] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [editedRows, setEditedRows] = useState(null);
+  const [busy, setBusy] = useState(false);
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
@@ -158,7 +226,8 @@ function App() {
   }, [pushToast]);
 
   const doConvert = useCallback(async () => {
-    if (!file) return;
+    if (!file || busy) return;
+    setBusy(true);
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -173,12 +242,15 @@ function App() {
       finishConvert(`Downloaded ${outName}`);
     } catch (e) {
       pushToast('error', e.message);
+    } finally {
+      setBusy(false);
     }
-  }, [file, finishConvert, pushToast]);
+  }, [file, busy, finishConvert, pushToast]);
 
   // Apply user edits by POSTing the already-transformed JSON to the backend.
   const doConvertEdited = useCallback(async () => {
-    if (!file || !preview || !editedRows) return;
+    if (!file || !preview || !editedRows || busy) return;
+    setBusy(true);
     try {
       const outName = file.name.replace(/\.csv$/i, '_edited.csv');
       const res = await fetch('/api/convert-edited', {
@@ -199,11 +271,14 @@ function App() {
       finishConvert(`Downloaded ${outName}`);
     } catch (e) {
       pushToast('error', e.message);
+    } finally {
+      setBusy(false);
     }
-  }, [file, preview, editedRows, finishConvert, pushToast]);
+  }, [file, preview, editedRows, busy, finishConvert, pushToast]);
 
   const doConvertBatch = useCallback(async () => {
-    if (batchFiles.length === 0) return;
+    if (batchFiles.length === 0 || busy) return;
+    setBusy(true);
     try {
       const fd = new FormData();
       for (const f of batchFiles) fd.append('files', f);
@@ -218,8 +293,10 @@ function App() {
       finishConvert(`Batch complete — ${summary}`);
     } catch (e) {
       pushToast('error', e.message);
+    } finally {
+      setBusy(false);
     }
-  }, [batchFiles, finishConvert, pushToast]);
+  }, [batchFiles, busy, finishConvert, pushToast]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -289,7 +366,7 @@ function App() {
   // Paste-anywhere — paste a CSV file (or raw CSV text) from the clipboard.
   useEffect(() => {
     const onPaste = (e) => {
-      if (stage !== STAGES.IDLE) return;
+      if (stage !== STAGES.IDLE || showCmd || showHelp) return;
       const items = e.clipboardData?.items || [];
       const files = [];
       for (const it of items) {
@@ -307,7 +384,7 @@ function App() {
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [handleFiles, stage]);
+  }, [handleFiles, stage, showCmd, showHelp]);
 
   // Build the command palette action list contextually.
   const commands = useMemo(() => {
@@ -441,6 +518,7 @@ function App() {
           {stage === STAGES.BATCH && (
             <BatchPanel
               files={batchFiles}
+              busy={busy}
               onConvert={doConvertBatch}
               onReset={reset}
               onRemove={(idx) => {
@@ -458,6 +536,7 @@ function App() {
               editedRows={editedRows}
               setCell={setCell}
               dirty={dirty}
+              busy={busy}
               onRevert={revertEdits}
               tab={tab}
               setTab={setTab}
@@ -553,7 +632,7 @@ function DropZone({ onFiles }) {
   );
 }
 
-function BatchPanel({ files, onConvert, onReset, onRemove }) {
+function BatchPanel({ files, busy, onConvert, onReset, onRemove }) {
   const totalBytes = files.reduce((a, f) => a + f.size, 0);
   return (
     <div className="batch">
@@ -577,9 +656,14 @@ function BatchPanel({ files, onConvert, onReset, onRemove }) {
         </div>
       </div>
       <div className="actions">
-        <button className="btn ghost" onClick={onReset}>← Back</button>
-        <button className="btn primary glow" onClick={onConvert} title="⌘/Ctrl+Enter">
-          <DownloadIcon /> Convert All → Download ZIP
+        <button className="btn ghost" onClick={onReset} disabled={busy}>← Back</button>
+        <button
+          className="btn primary glow"
+          onClick={onConvert}
+          title="⌘/Ctrl+Enter"
+          disabled={busy}
+        >
+          {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Convert All → Download ZIP</>}
         </button>
       </div>
     </div>
@@ -603,7 +687,7 @@ function Skeleton({ filename }) {
   );
 }
 
-function PreviewPanel({ file, preview, editedRows, setCell, dirty, onRevert, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
+function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRevert, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
   const { rowCount, originalColumns, transformedColumns, originalPreview,
     mapping, addedColumns, droppedColumns, truncated } = preview;
 
@@ -693,9 +777,9 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, onRevert, tab
       </div>
 
       <div className="actions">
-        <button className="btn ghost" onClick={onReset}>← Back</button>
+        <button className="btn ghost" onClick={onReset} disabled={busy}>← Back</button>
         {dirty && (
-          <button className="btn ghost" onClick={onRevert} title="Discard edits">
+          <button className="btn ghost" onClick={onRevert} title="Discard edits" disabled={busy}>
             Revert edits
           </button>
         )}
@@ -703,12 +787,18 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, onRevert, tab
           className={`btn ${dirty ? '' : 'primary glow'}`}
           onClick={onConvert}
           title="⌘/Ctrl+Enter"
+          disabled={busy}
         >
-          <DownloadIcon /> Download as-is
+          {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download as-is</>}
         </button>
         {dirty && (
-          <button className="btn primary glow" onClick={onConvertEdited} title="⌘/Ctrl+Enter">
-            <DownloadIcon /> Download edited
+          <button
+            className="btn primary glow"
+            onClick={onConvertEdited}
+            title="⌘/Ctrl+Enter"
+            disabled={busy}
+          >
+            {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download edited</>}
           </button>
         )}
       </div>
@@ -914,6 +1004,7 @@ function CommandPalette({ commands, onClose }) {
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef();
+  const trapRef = useFocusTrap(true);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -954,7 +1045,7 @@ function CommandPalette({ commands, onClose }) {
   let flatIdx = -1;
   return (
     <div className="cmd-backdrop" onClick={onClose}>
-      <div className="cmd-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Command palette">
+      <div ref={trapRef} className="cmd-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Command palette">
         <div className="cmd-input-row">
           <SearchIcon />
           <input
@@ -1001,6 +1092,7 @@ function CommandPalette({ commands, onClose }) {
 }
 
 function HelpOverlay({ onClose }) {
+  const trapRef = useFocusTrap(true);
   const shortcuts = [
     { keys: ['⌘/Ctrl', 'V'], desc: 'Paste a CSV (file or raw text)' },
     { keys: ['⌘/Ctrl', '↵'], desc: 'Convert & download (on preview)' },
@@ -1015,7 +1107,7 @@ function HelpOverlay({ onClose }) {
   ];
   return (
     <div className="help-backdrop" onClick={onClose}>
-      <div className="help-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Keyboard shortcuts">
+      <div ref={trapRef} className="help-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
         <div className="help-header">
           <div>Keyboard shortcuts</div>
           <button className="icon-btn sm" onClick={onClose} aria-label="Close">✕</button>
@@ -1183,4 +1275,8 @@ function FileIcon() {
   );
 }
 
-export default App;
+function Root() {
+  return <ErrorBoundary><App /></ErrorBoundary>;
+}
+
+export default Root;
