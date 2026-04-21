@@ -398,6 +398,54 @@ class PublicStatsAndNotesTests(unittest.TestCase):
         self.assertEqual(r2.status_code, 400)
 
 
+class FeedbackTests(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_feedback_requires_name(self):
+        r = self.client.post("/api/feedback", json={"kind": "suggestion", "text": "hi"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_feedback_rejects_bad_kind(self):
+        r = self.client.post(
+            "/api/feedback",
+            json={"kind": "rant", "text": "hi"},
+            headers={"X-User-Name": "Reporter"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_feedback_roundtrip_and_admin_actions(self):
+        # Submit
+        r = self.client.post(
+            "/api/feedback",
+            json={"kind": "issue", "text": "Upload fails on Safari"},
+            headers={"X-User-Name": "Reporter"},
+        )
+        self.assertEqual(r.status_code, 200)
+        fid = r.get_json()["id"]
+
+        # Admin login, list, resolve, reopen, delete.
+        self.client.post("/admin/login", data={"password": "testpw"})
+
+        listed = self.client.get("/admin/api/feedback?status=open").get_json()
+        self.assertTrue(any(i["id"] == fid for i in listed["items"]))
+        self.assertGreaterEqual(listed["openCount"], 1)
+
+        r2 = self.client.post(f"/admin/api/feedback/{fid}/resolve")
+        self.assertEqual(r2.status_code, 200)
+
+        resolved = self.client.get("/admin/api/feedback?status=resolved").get_json()
+        self.assertTrue(any(i["id"] == fid and i["status"] == "resolved" for i in resolved["items"]))
+
+        r3 = self.client.post(f"/admin/api/feedback/{fid}/reopen")
+        self.assertEqual(r3.status_code, 200)
+
+        r4 = self.client.delete(f"/admin/api/feedback/{fid}")
+        self.assertEqual(r4.status_code, 200)
+        final = self.client.get("/admin/api/feedback?status=all").get_json()
+        self.assertFalse(any(i["id"] == fid for i in final["items"]))
+
+
 class AdminExportAndDeleteTests(unittest.TestCase):
     def setUp(self):
         self.client = app.test_client()

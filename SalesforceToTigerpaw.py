@@ -92,6 +92,8 @@ ACTIVE_WINDOW_SECONDS = 5 * 60  # user is "active" if seen in the last N seconds
 ADMIN_SESSION_KEY = "_admin"
 NOTE_MAX_LEN = 280
 NOTES_RECENT_LIMIT = 20
+FEEDBACK_MAX_LEN = 2000
+FEEDBACK_KINDS = {"suggestion", "issue"}
 ENABLE_GEOIP = os.environ.get("ENABLE_GEOIP", "0") == "1"
 GEOIP_TIMEOUT_SECONDS = 2.5
 GEOIP_CACHE_TTL_DAYS = 30
@@ -197,13 +199,36 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS ip_geo (
                 ip TEXT PRIMARY KEY,
                 country TEXT,
+                country_code TEXT,
                 region TEXT,
                 city TEXT,
                 isp TEXT,
                 cached_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                admin_note TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS feedback_created ON feedback(created_at);
+            CREATE INDEX IF NOT EXISTS feedback_status ON feedback(status);
             """
         )
+        # Idempotent schema migration for databases created before country_code
+        # landed. ADD COLUMN raises OperationalError if the column exists; we
+        # swallow it so this stays safe to re-run.
+        try:
+            conn.execute("ALTER TABLE ip_geo ADD COLUMN country_code TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -263,7 +288,7 @@ def resolve_geo(ip: str) -> dict | None:
         return None
     conn = _db()
     row = conn.execute(
-        "SELECT country, region, city, isp, cached_at FROM ip_geo WHERE ip = ?", (ip,)
+        "SELECT country, country_code, region, city, isp, cached_at FROM ip_geo WHERE ip = ?", (ip,)
     ).fetchone()
     now = datetime.now(timezone.utc)
     if row:
@@ -271,14 +296,17 @@ def resolve_geo(ip: str) -> dict | None:
         try:
             cached = _parse_iso(row["cached_at"])
             if (now - cached).days < GEOIP_CACHE_TTL_DAYS:
-                return {"country": row["country"], "region": row["region"],
-                        "city": row["city"], "isp": row["isp"], "cached": True}
+                return {
+                    "country": row["country"], "countryCode": row["country_code"],
+                    "region": row["region"], "city": row["city"],
+                    "isp": row["isp"], "cached": True,
+                }
         except Exception:
             pass
 
     try:
         req = urllib.request.Request(
-            f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp",
+            f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city,isp",
             headers={"User-Agent": "CSV-Forge/1.4"},
         )
         with urllib.request.urlopen(req, timeout=GEOIP_TIMEOUT_SECONDS) as resp:
@@ -287,14 +315,16 @@ def resolve_geo(ip: str) -> dict | None:
             return None
         result = {
             "country": data.get("country"),
+            "countryCode": data.get("countryCode"),
             "region": data.get("regionName"),
             "city": data.get("city"),
             "isp": data.get("isp"),
             "cached": False,
         }
         conn.execute(
-            "INSERT OR REPLACE INTO ip_geo (ip, country, region, city, isp, cached_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (ip, result["country"], result["region"], result["city"], result["isp"], now.isoformat()),
+            "INSERT OR REPLACE INTO ip_geo (ip, country, country_code, region, city, isp, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ip, result["country"], result["countryCode"], result["region"],
+             result["city"], result["isp"], now.isoformat()),
         )
         conn.commit()
         return result
@@ -747,6 +777,36 @@ def notes_route():
     return jsonify({"id": cur.lastrowid, "user": name, "text": text, "createdAt": now})
 
 
+@app.route("/api/feedback", methods=["POST"])
+def feedback_create():
+    """Any identified user can submit a suggestion or issue for the admin."""
+    body = request.get_json(silent=True) or {}
+    kind = (body.get("kind") or "").strip().lower()
+    text = (body.get("text") or "").strip()
+    name = _current_user_name()
+    if name == "Guest":
+        return jsonify({"error": "Set your name before submitting feedback."}), 400
+    if kind not in FEEDBACK_KINDS:
+        return jsonify({"error": "Pick a kind: suggestion or issue."}), 400
+    if not text:
+        return jsonify({"error": "Feedback can't be empty."}), 400
+    if len(text) > FEEDBACK_MAX_LEN:
+        return jsonify({"error": f"Feedback too long — max {FEEDBACK_MAX_LEN} characters."}), 400
+
+    ip = _client_ip()
+    ua = request.headers.get("User-Agent", "")
+    user_id = _upsert_user(name, ip, ua)
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO feedback (user_id, user_name, kind, text, status, created_at) VALUES (?, ?, ?, ?, 'open', ?)",
+        (user_id, name, kind, text, now),
+    )
+    conn.commit()
+    record_event("feedback_submitted", {"kind": kind, "length": len(text)})
+    return jsonify({"id": cur.lastrowid, "ok": True})
+
+
 @app.route("/api/identify", methods=["POST"])
 def identify_route():
     """Register / refresh a user by name. Called once per browser on first visit.
@@ -1023,6 +1083,79 @@ def admin_user_delete(user_id: int):
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
     logger.warning("admin deleted user %s (%s) from %s", user_id, row["name"], _client_ip())
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/api/feedback")
+@admin_required
+def admin_feedback_list():
+    status = request.args.get("status", "all")
+    conn = _db()
+    sql = "SELECT id, user_id, user_name, kind, text, status, admin_note, created_at, resolved_at FROM feedback"
+    args: list = []
+    if status in ("open", "resolved"):
+        sql += " WHERE status = ?"
+        args.append(status)
+    sql += " ORDER BY (status = 'open') DESC, id DESC"
+    rows = conn.execute(sql, args).fetchall()
+    open_count = conn.execute("SELECT COUNT(*) c FROM feedback WHERE status='open'").fetchone()["c"]
+    total = conn.execute("SELECT COUNT(*) c FROM feedback").fetchone()["c"]
+    return jsonify(
+        {
+            "openCount": open_count,
+            "total": total,
+            "items": [
+                {
+                    "id": r["id"],
+                    "userId": r["user_id"],
+                    "userName": r["user_name"],
+                    "kind": r["kind"],
+                    "text": r["text"],
+                    "status": r["status"],
+                    "adminNote": r["admin_note"],
+                    "createdAt": r["created_at"],
+                    "resolvedAt": r["resolved_at"],
+                }
+                for r in rows
+            ],
+        }
+    )
+
+
+@app.route("/admin/api/feedback/<int:fid>/resolve", methods=["POST"])
+@admin_required
+def admin_feedback_resolve(fid: int):
+    conn = _db()
+    row = conn.execute("SELECT id FROM feedback WHERE id = ?", (fid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("UPDATE feedback SET status='resolved', resolved_at=? WHERE id = ?", (now, fid))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/api/feedback/<int:fid>/reopen", methods=["POST"])
+@admin_required
+def admin_feedback_reopen(fid: int):
+    conn = _db()
+    row = conn.execute("SELECT id FROM feedback WHERE id = ?", (fid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    conn.execute("UPDATE feedback SET status='open', resolved_at=NULL WHERE id = ?", (fid,))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/api/feedback/<int:fid>", methods=["DELETE"])
+@admin_required
+def admin_feedback_delete(fid: int):
+    conn = _db()
+    row = conn.execute("SELECT id FROM feedback WHERE id = ?", (fid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    conn.execute("DELETE FROM feedback WHERE id = ?", (fid,))
+    conn.commit()
     return jsonify({"ok": True})
 
 

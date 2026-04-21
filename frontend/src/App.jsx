@@ -155,6 +155,7 @@ function App() {
   const [userName, setUserNameState] = useState(() => getUserName());
   const [showNamePrompt, setShowNamePrompt] = useState(() => !getUserName());
   const [nameError, setNameError] = useState('');
+  const [showFeedback, setShowFeedback] = useState(false);
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
@@ -465,6 +466,13 @@ function App() {
       keywords: 'identity user who me',
       perform: () => setShowNamePrompt(true),
     });
+    cmds.push({
+      id: 'feedback',
+      title: 'Send feedback (suggestion or issue)',
+      group: 'Feedback',
+      keywords: 'bug report suggest improvement idea problem',
+      perform: () => setShowFeedback(true),
+    });
     if (stage === STAGES.IDLE) {
       cmds.push({
         id: 'browse',
@@ -630,6 +638,15 @@ function App() {
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       {showCmd && <CommandPalette commands={commands} onClose={() => setShowCmd(false)} />}
       {dragActive && <DragVeil active={stage === STAGES.IDLE} />}
+      {userName && !showNamePrompt && (
+        <FeedbackFab onOpen={() => setShowFeedback(true)} />
+      )}
+      {showFeedback && (
+        <FeedbackModal
+          onClose={() => setShowFeedback(false)}
+          pushToast={pushToast}
+        />
+      )}
       {showNamePrompt && (
         <NameModal
           initialValue={userName}
@@ -1481,6 +1498,91 @@ function Confetti() {
           }}
         />
       ))}
+    </div>
+  );
+}
+
+function FeedbackFab({ onOpen }) {
+  return (
+    <button className="fab" onClick={onOpen} title="Send feedback (suggestion or issue)" aria-label="Send feedback">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+      <span>Feedback</span>
+    </button>
+  );
+}
+
+function FeedbackModal({ onClose, pushToast }) {
+  const [kind, setKind] = useState('suggestion');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const trapRef = useFocusTrap(true);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const clean = text.trim();
+    if (!clean || busy) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, text: clean }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Failed to submit.');
+      pushToast('success', kind === 'issue' ? 'Issue submitted — thanks!' : 'Suggestion submitted — thanks!');
+      onClose();
+    } catch (err) {
+      pushToast('error', err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remaining = 2000 - text.length;
+
+  return (
+    <div className="feedback-backdrop" onClick={onClose}>
+      <div ref={trapRef} className="feedback-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Send feedback">
+        <div className="feedback-head">
+          <div>
+            <div className="feedback-title">Send feedback</div>
+            <div className="feedback-sub">Admins see this in the dashboard. Be as specific as you like.</div>
+          </div>
+          <button className="icon-btn sm" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <form className="feedback-form" onSubmit={submit}>
+          <div className="feedback-kind">
+            <label className={`kind-chip ${kind === 'suggestion' ? 'active' : ''}`}>
+              <input type="radio" name="kind" value="suggestion" checked={kind === 'suggestion'} onChange={() => setKind('suggestion')} />
+              <span>💡 Suggestion</span>
+            </label>
+            <label className={`kind-chip ${kind === 'issue' ? 'active' : ''}`}>
+              <input type="radio" name="kind" value="issue" checked={kind === 'issue'} onChange={() => setKind('issue')} />
+              <span>🐛 Issue</span>
+            </label>
+          </div>
+          <textarea
+            className="feedback-textarea"
+            placeholder={kind === 'issue' ? 'What broke? What were you trying to do? (Include filenames if relevant.)' : "What would make this better? Paste links or examples if it helps."}
+            value={text}
+            onChange={(e) => setText(e.target.value.slice(0, 2000))}
+            rows={6}
+            autoFocus
+          />
+          <div className="feedback-footer">
+            <span className={`feedback-counter ${remaining < 100 ? 'near-limit' : ''}`}>{remaining} left</span>
+            <div className="feedback-actions">
+              <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+              <button type="submit" className="btn primary" disabled={!text.trim() || busy}>
+                {busy ? 'Sending…' : 'Send'}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
