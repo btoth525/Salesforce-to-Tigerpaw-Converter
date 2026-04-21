@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-04-21
+### Added
+- **Feedback / issues inbox**: floating FAB button on every page opens a modal with a 💡 Suggestion / 🐛 Issue toggle, textarea (2 000 char max), and submit flow. Admins get a new filterable card on `/admin` with open-count badge and one-click **Mark resolved / Reopen / Delete**. Also reachable from the command palette.
+- **Location flag badges**: admin event feed now shows a gradient pill with the country flag emoji (derived from ISO country code), a map-pin SVG, and "City, Region, Country" when `ENABLE_GEOIP=1` resolves the IP. ISP shows on hover.
+### Changed
+- `resolve_geo` now fetches + caches `countryCode` from ip-api.com. `ip_geo` table migrates idempotently via `ALTER TABLE ADD COLUMN`.
+- New `feedback` table with indexed `status` and `created_at` columns.
+### Endpoints
+- `POST /api/feedback`
+- `GET /admin/api/feedback`
+- `POST /admin/api/feedback/<id>/resolve`
+- `POST /admin/api/feedback/<id>/reopen`
+- `DELETE /admin/api/feedback/<id>`
+### Tests
+- 4 new integration tests covering feedback auth, validation, and the full resolve/reopen/delete cycle. 38/38 pass.
+
 ## [1.4.0] - 2026-04-21
 ### Added
 - **Team wall on the main page** — 280-char shoutbox visible to anyone using the app. Auto-refreshes; any identified user can post. `GET/POST /api/notes`.
