@@ -1,0 +1,13 @@
+{
+  "name": "apex-turn",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ApexSight TURN credential minting Worker (no-open-ports remote two-way talk)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3"
+  }
+}

@@ -1,0 +1,22 @@
+# Cloudflare Worker config for the ApexSight TURN credential minter.
+#
+# Secrets are NOT stored here. Set them with:
+#   wrangler secret put TURN_KEY_ID
+#   wrangler secret put TURN_KEY_API_TOKEN
+#   wrangler secret put APP_SHARED_SECRET
+#
+# Then: wrangler deploy
+#
+# The deployed URL (e.g. https://apex-turn.<account>.workers.dev) becomes the
+# app's `turnCredentialsURL` setting.
+
+name = "apex-turn"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# No [vars] block on purpose — all three values are SECRETS, never plaintext vars.
+
+# After deploy, add a WAF / rate-limit rule on this Worker's route in the
+# Cloudflare dashboard (Security -> WAF -> Rate limiting rules). The minting
+# endpoint is public and authenticated; rate limiting blunts credential-stuffing
+# and abuse of the upstream Cloudflare TURN quota.
