@@ -52,13 +52,19 @@ body {
 }
 .login-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,0.18); }
 .login-card button {
-  padding: 0.75rem; border: none; border-radius: var(--radius-sm);
+  padding: 0.75rem; min-height: 44px; border: none; border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--accent), #5b3dff);
   color: #fff; font-weight: 700; cursor: pointer;
   transition: transform 0.1s, box-shadow 0.2s;
   font-size: 1rem;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
-.login-card button:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -8px rgba(124,92,255,0.8); }
+/* Lift only where a real pointer exists; on touch screens :hover sticks after a tap and leaves the button looking stuck */
+@media (hover: hover) {
+  .login-card button:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -8px rgba(124,92,255,0.8); }
+}
+.login-card button:active { transform: translateY(1px) scale(0.99); box-shadow: 0 6px 16px -8px rgba(124,92,255,0.7); }
 .login-error {
   background: rgba(255,94,138,0.15);
   border: 1px solid rgba(255,94,138,0.45);
