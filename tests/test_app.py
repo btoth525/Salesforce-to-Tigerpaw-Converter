@@ -1,14 +1,19 @@
-"""Unit + integration tests for SalesforceToTigerpaw."""
+"""Route / integration tests for SalesforceToTigerpaw (Flask layer).
+
+The engine itself is covered in test_converter.py; these tests check the
+HTTP contract: shapes, status codes, headers, options plumbing, telemetry.
+"""
 
 from __future__ import annotations
 
+import csv
 import io
+import json
 import os
 import sys
 import tempfile
 import unittest
-
-import pandas as pd
+import zipfile
 
 # Point the app at a fresh on-disk DB before import so tests don't share state
 # with whatever ran last on this machine.
@@ -22,62 +27,35 @@ from SalesforceToTigerpaw import (  # noqa: E402
     COLUMN_MAPPING,
     DESIRED_ORDER,
     NEW_COLUMNS,
+    PREVIEW_ROWS,
+    VERSION,
     app,
-    transform_salesforce_df,
 )
 
-
-def _sample_df(rows=2):
-    return pd.DataFrame(
-        {
-            "Product Code": [f"SKU-{i}" for i in range(rows)],
-            "Description": [f"Widget {i}" for i in range(rows)],
-            "Quantity": [i + 1 for i in range(rows)],
-            "Net Unit Price": [10.0 * (i + 1) for i in range(rows)],
-            "Unit Cost": [5.0 * (i + 1) for i in range(rows)],
-            "Total Price": [10.0 * (i + 1) * (i + 1) for i in range(rows)],
-            "Extra": ["x"] * rows,
-        }
-    )
+HEADER = ["Product Code", "Description", "Quantity", "Net Unit Price", "Unit Cost", "Total Price", "Extra"]
 
 
-def _sample_csv_bytes(rows=2) -> bytes:
-    df = _sample_df(rows)
-    return df.to_csv(index=False).encode("utf-8")
+def _sample_rows(rows=2):
+    return [
+        [f"SKU-{i}", f"Widget {i}", f"{i + 1}.00", f"{10.0 * (i + 1):.2f}", f"{5.0 * (i + 1):.2f}",
+         f"{10.0 * (i + 1) * (i + 1):.2f}", "x"]
+        for i in range(rows)
+    ]
 
 
-class TransformTests(unittest.TestCase):
-    def test_renames_mapped_columns(self):
-        out = transform_salesforce_df(_sample_df())
-        for src, dst in COLUMN_MAPPING.items():
-            self.assertIn(dst, out.columns)
-            if src != dst:
-                self.assertNotIn(src, out.columns)
+def _sample_csv_bytes(rows=2, extra_lines=()) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    w.writerow(HEADER)
+    for r in _sample_rows(rows):
+        w.writerow(r)
+    return (buf.getvalue() + "".join(l + "\n" for l in extra_lines)).encode("utf-8")
 
-    def test_drops_total_price_from_source_and_re_adds_empty(self):
-        out = transform_salesforce_df(_sample_df())
-        # Original "Total Price" values are dropped; new empty column takes its place.
-        self.assertTrue((out["Total Price"] == "").all())
 
-    def test_adds_new_columns_when_missing(self):
-        out = transform_salesforce_df(_sample_df())
-        for col in NEW_COLUMNS:
-            self.assertIn(col, out.columns)
-
-    def test_reorders_columns(self):
-        out = transform_salesforce_df(_sample_df())
-        ordered_present = [c for c in DESIRED_ORDER if c in out.columns]
-        self.assertEqual(list(out.columns)[: len(ordered_present)], ordered_present)
-
-    def test_preserves_extra_columns_after_ordered(self):
-        out = transform_salesforce_df(_sample_df())
-        self.assertIn("Extra", out.columns)
-        self.assertGreater(list(out.columns).index("Extra"), list(out.columns).index("Part Number"))
-
-    def test_raises_on_missing_required_columns(self):
-        bad = pd.DataFrame({"Product Code": ["A"], "Description": ["B"]})
-        with self.assertRaises(ValueError):
-            transform_salesforce_df(bad)
+def _upload(client, path, data, name="in.csv", fields=None, headers=None):
+    form = {"file": (io.BytesIO(data), name)}
+    form.update(fields or {})
+    return client.post(path, data=form, content_type="multipart/form-data", headers=headers or {})
 
 
 class ConvertRouteTests(unittest.TestCase):
@@ -90,43 +68,56 @@ class ConvertRouteTests(unittest.TestCase):
         self.assertIn("error", r.get_json())
 
     def test_rejects_non_csv_extension(self):
-        r = self.client.post(
-            "/api/convert",
-            data={"file": (io.BytesIO(b"hi"), "not.txt")},
-            content_type="multipart/form-data",
-        )
+        r = _upload(self.client, "/api/convert", b"hi", name="not.txt")
         self.assertEqual(r.status_code, 400)
 
     def test_rejects_empty_csv(self):
-        r = self.client.post(
-            "/api/convert",
-            data={"file": (io.BytesIO(b""), "empty.csv")},
-            content_type="multipart/form-data",
-        )
+        r = _upload(self.client, "/api/convert", b"", name="empty.csv")
         self.assertEqual(r.status_code, 400)
 
     def test_rejects_missing_required_columns(self):
-        csv_bytes = b"Foo,Bar\n1,2\n"
-        r = self.client.post(
-            "/api/convert",
-            data={"file": (io.BytesIO(csv_bytes), "bad.csv")},
-            content_type="multipart/form-data",
-        )
+        r = _upload(self.client, "/api/convert", b"Foo,Bar\n1,2\n", name="bad.csv")
         self.assertEqual(r.status_code, 400)
-        self.assertIn("Missing expected columns", r.get_json()["error"])
+        msg = r.get_json()["error"]
+        self.assertIn("Missing expected columns", msg)
+        self.assertIn("Product Code", msg)
 
     def test_converts_valid_csv(self):
-        r = self.client.post(
-            "/api/convert",
-            data={"file": (io.BytesIO(_sample_csv_bytes()), "in.csv")},
-            content_type="multipart/form-data",
-        )
+        r = _upload(self.client, "/api/convert", _sample_csv_bytes())
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.mimetype, "text/csv")
         self.assertIn('filename="in_converted.csv"', r.headers["Content-Disposition"])
-        # Header row contains the renamed column.
-        first_line = r.data.splitlines()[0].decode("utf-8-sig")
-        self.assertIn("Part Number", first_line)
+        self.assertTrue(r.data.startswith(b"\xef\xbb\xbf"))
+        rows = list(csv.reader(io.StringIO(r.data.decode("utf-8-sig"))))
+        self.assertEqual(rows[0][: len(DESIRED_ORDER)], DESIRED_ORDER)
+        self.assertEqual(rows[0][-1], "Extra")
+        self.assertEqual(rows[1][:5], ["SKU-0", "Widget 0", "1.00", "10.00", "5.00"])
+        self.assertEqual(rows[1][5], "")  # Total Price emptied
+
+    def test_summary_header(self):
+        data = _sample_csv_bytes(rows=3, extra_lines=["", '"Copyright (c) salesforce.com"'])
+        r = _upload(self.client, "/api/convert", data)
+        self.assertEqual(r.status_code, 200)
+        summary = json.loads(r.headers["X-Convert-Summary"])
+        self.assertEqual(summary["rows"], 3)
+        self.assertEqual(summary["skipped"], 2)
+        self.assertEqual(summary["encoding"], "utf-8")
+
+    def test_options_from_form_fields(self):
+        r = _upload(self.client, "/api/convert", _sample_csv_bytes(),
+                    fields={"bom": "false", "quoteAll": "true", "keepExtras": "false"})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.data.startswith(b"\xef\xbb\xbf"))
+        first = r.data.decode().splitlines()[0]
+        self.assertTrue(first.startswith('"Part Number","Description"'))
+        self.assertNotIn("Extra", first)
+
+    def test_cp1252_input_no_longer_500s(self):
+        raw = (b'"Product Code","Description","Quantity","Net Unit Price","Unit Cost"\n'
+               b'"A1","Brandon\x92s bracket","1.00","2.00","1.00"\n')
+        r = _upload(self.client, "/api/convert", raw)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"Brandon's bracket", r.data)
 
 
 class PreviewRouteTests(unittest.TestCase):
@@ -134,19 +125,53 @@ class PreviewRouteTests(unittest.TestCase):
         self.client = app.test_client()
 
     def test_returns_preview_json(self):
-        r = self.client.post(
-            "/api/preview",
-            data={"file": (io.BytesIO(_sample_csv_bytes(rows=3)), "in.csv")},
-            content_type="multipart/form-data",
-        )
+        data = _sample_csv_bytes(rows=3, extra_lines=["", '"Generated By: Someone"'])
+        r = _upload(self.client, "/api/preview", data)
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
         self.assertEqual(body["rowCount"], 3)
+        self.assertEqual(body["previewLimit"], PREVIEW_ROWS)
+        self.assertFalse(body["truncated"])
+        self.assertEqual(body["encoding"], "utf-8")
+        self.assertFalse(body["hadBom"])
+        self.assertEqual(body["delimiter"], ",")
+        self.assertEqual(body["headerRowIndex"], 0)
         self.assertIn("Product Code", body["originalColumns"])
         self.assertIn("Part Number", body["transformedColumns"])
         self.assertEqual(len(body["originalPreview"]), 3)
+        self.assertEqual(len(body["transformedPreview"]), 3)
         self.assertEqual(body["mapping"], COLUMN_MAPPING)
+        self.assertEqual(body["aliasesUsed"], {})
         self.assertIn("Total Price", body["droppedColumns"])
+        self.assertEqual(sorted(body["addedColumns"]), sorted(NEW_COLUMNS))
+        self.assertEqual([x["reason"] for x in body["skippedRows"]], ["blank", "footer"])
+        self.assertEqual(body["changes"], [])
+        self.assertEqual(body["warnings"], [])
+        self.assertFalse(body["changesTruncated"])
+        self.assertEqual(body["options"]["asciiOnly"], True)
+        # Values are strings, never numbers: "1.00" survives.
+        self.assertEqual(body["transformedPreview"][0]["Quantity"], "1.00")
+        self.assertEqual(body["originalPreview"][0]["Quantity"], "1.00")
+
+    def test_preview_reports_changes_and_aliases(self):
+        buf = io.StringIO()
+        w = csv.writer(buf, quoting=csv.QUOTE_ALL, lineterminator="\n")
+        w.writerow(["Part Number", "Description", "Qty", "Net Unit Price", "Unit Cost"])
+        w.writerow(["A", "Verkada\u2019s cam", "$1,000", "2", "3"])
+        r = _upload(self.client, "/api/preview", buf.getvalue().encode("utf-8"))
+        body = r.get_json()
+        self.assertEqual(body["aliasesUsed"], {"Part Number": "Product Code", "Qty": "Quantity"})
+        self.assertEqual(body["mapping"]["Qty"], "Quantity")
+        kinds = {c["column"]: c["kind"] for c in body["changes"]}
+        self.assertEqual(kinds, {"Description": "punctuation", "Quantity": "number"})
+        change = next(c for c in body["changes"] if c["column"] == "Description")
+        self.assertEqual(change["from"], "Verkada\u2019s cam")
+        self.assertEqual(change["to"], "Verkada's cam")
+        self.assertEqual(change["row"], 0)
+
+    def test_preview_rejects_missing_columns(self):
+        r = _upload(self.client, "/api/preview", b"Foo,Bar\n1,2\n")
+        self.assertEqual(r.status_code, 400)
 
 
 class ConvertEditedRouteTests(unittest.TestCase):
@@ -180,6 +205,34 @@ class ConvertEditedRouteTests(unittest.TestCase):
         self.assertEqual(lines[0], "Part Number,Description,Vendor")
         self.assertEqual(lines[1], "A1,Widget,ACME")
         self.assertEqual(lines[2], "B2,Gadget,")
+        self.assertIn("X-Convert-Summary", r.headers)
+
+    def test_edited_cells_are_cleaned(self):
+        body = {
+            "filename": "edited.csv",
+            "columns": ["Part Number", "Description", "Quantity"],
+            "rows": [{"Part Number": "A1", "Description": "pasted \u201cquote\u201d\nnext", "Quantity": "$3"}],
+        }
+        r = self.client.post("/api/convert-edited", json=body)
+        self.assertEqual(r.status_code, 200)
+        lines = r.data.decode("utf-8-sig").splitlines()
+        self.assertEqual(lines[1], 'A1,"pasted ""quote"" next",3')
+        summary = json.loads(r.headers["X-Convert-Summary"])
+        self.assertEqual(summary["changes"], 2)
+
+    def test_edited_options_nested(self):
+        body = {
+            "filename": "edited.csv",
+            "columns": ["Part Number"],
+            "rows": [{"Part Number": "A1"}],
+            "options": {"bom": False, "quoteAll": True},
+        }
+        r = self.client.post("/api/convert-edited", json=body)
+        self.assertEqual(r.data, b'"Part Number"\r\n"A1"\r\n')
+
+    def test_rejects_non_dict_rows(self):
+        r = self.client.post("/api/convert-edited", json={"columns": ["A"], "rows": ["nope"]})
+        self.assertEqual(r.status_code, 400)
 
 
 class ConvertBatchRouteTests(unittest.TestCase):
@@ -191,7 +244,7 @@ class ConvertBatchRouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_converts_multiple_files_into_zip(self):
-        import zipfile as zf
+        zf = zipfile
 
         r = self.client.post(
             "/api/convert-batch",
@@ -210,9 +263,15 @@ class ConvertBatchRouteTests(unittest.TestCase):
         self.assertIn("a_converted.csv", names)
         self.assertIn("b_converted.csv", names)
         self.assertNotIn("_errors.txt", names)
+        self.assertIn("_report.txt", names)
+        report = archive.read("_report.txt").decode()
+        self.assertIn("[OK]    a.csv -> a_converted.csv: 2 rows", report)
+        self.assertIn("[OK]    b.csv -> b_converted.csv: 3 rows", report)
+        self.assertIn(VERSION, report)
+        self.assertEqual(r.headers["X-Batch-Summary"], "2/2 succeeded")
 
     def test_partial_failure_includes_errors_file(self):
-        import zipfile as zf
+        zf = zipfile
 
         bad_csv = b"Foo,Bar\n1,2\n"
         r = self.client.post(
@@ -231,6 +290,7 @@ class ConvertBatchRouteTests(unittest.TestCase):
         self.assertIn("good_converted.csv", names)
         self.assertIn("_errors.txt", names)
         self.assertIn("bad.csv", archive.read("_errors.txt").decode())
+        self.assertIn("[ERROR] bad.csv", archive.read("_report.txt").decode())
 
 
 class SpaRouteTests(unittest.TestCase):
@@ -245,7 +305,14 @@ class SpaRouteTests(unittest.TestCase):
     def test_health(self):
         r = self.client.get("/api/health")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.get_json(), {"status": "ok"})
+        self.assertEqual(r.get_json(), {"status": "ok", "version": VERSION})
+
+    def test_api_http_errors_are_json(self):
+        # The SPA catch-all answers GET for any path, so a POST to an unknown
+        # /api/ path is a 405; what matters is that it comes back as JSON.
+        r = self.client.post("/api/does-not-exist")
+        self.assertEqual(r.status_code, 405)
+        self.assertIn("error", r.get_json())
 
     def test_traversal_attempt_falls_back_to_spa_or_503(self):
         # A path that tries to escape the build dir must not leak /etc/passwd

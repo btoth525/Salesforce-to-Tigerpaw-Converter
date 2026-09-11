@@ -3,6 +3,84 @@ import './App.css';
 
 const STAGES = { IDLE: 'idle', LOADING: 'loading', PREVIEW: 'preview', BATCH: 'batch', DONE: 'done' };
 
+// --- Output options (v2) ----------------------------------------------------
+// Sent with every preview / convert request. Persisted per browser.
+const OPTIONS_KEY = 'csv-forge-options';
+const DEFAULT_OPTIONS = {
+  asciiOnly: true,
+  bom: true,
+  quoteAll: false,
+  keepExtras: true,
+  groupAsPhase: false,
+};
+const OPTION_META = [
+  { key: 'asciiOnly', label: 'Plain ASCII text (recommended)', hint: 'Smart quotes, dashes, symbols and accents become plain characters so nothing turns into “Ã¢â‚¬â„¢” garbage in Tigerpaw.' },
+  { key: 'bom', label: 'UTF-8 BOM for Excel', hint: 'Adds the byte-order mark Excel expects. Turn off for a bare ANSI/ASCII file.' },
+  { key: 'quoteAll', label: 'Quote every field', hint: 'Wrap every cell in double quotes (Salesforce style) instead of only the cells that need it.' },
+  { key: 'keepExtras', label: 'Keep extra Salesforce columns', hint: 'Append unmapped source columns (Quote Number, Group Name…) after the Tigerpaw columns.' },
+  { key: 'groupAsPhase', label: 'Use quote-line Group as Project Phase', hint: 'Copy the Salesforce “Group: Group Name” column into the Tigerpaw Project Phase column.' },
+];
+
+function loadOptions() {
+  try {
+    const raw = localStorage.getItem(OPTIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const out = { ...DEFAULT_OPTIONS };
+    for (const k of Object.keys(DEFAULT_OPTIONS)) {
+      if (typeof parsed?.[k] === 'boolean') out[k] = parsed[k];
+    }
+    return out;
+  } catch {
+    return { ...DEFAULT_OPTIONS };
+  }
+}
+
+function saveOptions(opts) {
+  try { localStorage.setItem(OPTIONS_KEY, JSON.stringify(opts)); } catch { /* ignore */ }
+}
+
+function appendOptions(fd, opts) {
+  for (const k of Object.keys(DEFAULT_OPTIONS)) fd.append(k, String(!!opts?.[k]));
+  return fd;
+}
+
+// Parse the X-Convert-Summary header the backend sets on CSV downloads.
+function readSummary(res) {
+  try {
+    const raw = res.headers.get('X-Convert-Summary');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function summaryText(name, summary) {
+  const parts = [`Downloaded ${name}`];
+  if (!summary) return parts[0];
+  if (typeof summary.rows === 'number') parts.push(`${summary.rows.toLocaleString()} row${summary.rows === 1 ? '' : 's'}`);
+  if (summary.changes > 0) parts.push(`${summary.changes.toLocaleString()} cell${summary.changes === 1 ? '' : 's'} fixed`);
+  if (summary.skipped > 0) parts.push(`${summary.skipped.toLocaleString()} row${summary.skipped === 1 ? '' : 's'} dropped`);
+  return parts.join(' · ');
+}
+
+const CHANGE_KIND_LABELS = {
+  mojibake: 'Mojibake repaired',
+  punctuation: 'Smart punctuation',
+  control: 'Control chars removed',
+  linebreak: 'Line break removed',
+  whitespace: 'Whitespace trimmed',
+  number: 'Number cleaned',
+  non_ascii: 'Non-ASCII replaced',
+};
+const SKIP_REASON_LABELS = {
+  blank: 'Blank row',
+  footer: 'Salesforce footer',
+  totals: 'Totals row',
+  preamble: 'Title/preamble line',
+};
+const labelKind = (k) => CHANGE_KIND_LABELS[k] || (k ? String(k).replace(/_/g, ' ') : 'Changed');
+const labelReason = (r) => SKIP_REASON_LABELS[r] || (r ? String(r).replace(/_/g, ' ') : 'Dropped');
+
 // --- Error boundary ---------------------------------------------------------
 // Catches render/commit errors anywhere in the tree so a crash shows a helpful
 // fallback instead of a blank page.
@@ -164,12 +242,31 @@ function App() {
   const [showNamePrompt, setShowNamePrompt] = useState(() => !getUserName());
   const [nameError, setNameError] = useState('');
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
+  const [options, setOptions] = useState(() => loadOptions());
+  const [appVersion, setAppVersion] = useState('');
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  useEffect(() => { saveOptions(options); }, [options]);
+
+  // Version badge for the footer — fetched once.
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d?.version) setAppVersion(String(d.version)); })
+      .catch(() => { /* footer falls back to a default */ });
+    return () => { alive = false; };
+  }, []);
+
+  const setOption = useCallback((key, value) => {
+    setOptions((prev) => ({ ...prev, [key]: !!value }));
+  }, []);
 
   // Watch for an admin-initiated full reset. The server bumps `resetAt` in
   // /api/public-stats when an admin clicks "Reset data"; when we see a newer
@@ -241,31 +338,46 @@ function App() {
     setEditedRows(null);
   }, []);
 
-  const loadPreview = useCallback(async (f) => {
+  // `silent` re-runs the preview in place (used when an output option changes)
+  // without flashing the skeleton or re-warning about truncation.
+  const loadPreview = useCallback(async (f, { silent = false, opts } = {}) => {
     if (!f) return;
     if (!f.name.toLowerCase().endsWith('.csv')) {
       pushToast('error', 'Only .csv files are supported.');
       return;
     }
     setFile(f);
-    setStage(STAGES.LOADING);
+    if (!silent) setStage(STAGES.LOADING);
     try {
       const fd = new FormData();
       fd.append('file', f);
+      appendOptions(fd, opts || options);
       const res = await apiFetch('/api/preview', { method: 'POST', body: fd });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || 'Preview failed.');
       setPreview(body);
-      setEditedRows(body.transformedPreview.map((r) => ({ ...r })));
+      setEditedRows((body.transformedPreview || []).map((r) => ({ ...r })));
       setStage(STAGES.PREVIEW);
-      if (body.truncated) {
-        pushToast('warn', `Large file — editing disabled (${body.rowCount.toLocaleString()} rows > preview cap).`);
+      if (body.truncated && !silent) {
+        const cap = body.previewLimit ? ` > ${body.previewLimit.toLocaleString()} preview cap` : ' > preview cap';
+        pushToast('warn', `Large file — editing disabled (${(body.rowCount ?? 0).toLocaleString()} rows${cap}).`);
       }
     } catch (e) {
       pushToast('error', e.message);
-      setStage(STAGES.IDLE);
+      if (!silent) setStage(STAGES.IDLE);
     }
-  }, [pushToast]);
+  }, [pushToast, options]);
+
+  // Changing an output option while previewing re-runs the preview so the
+  // Cleanup card and converted table reflect the new settings.
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    const prev = optionsRef.current;
+    optionsRef.current = options;
+    if (prev === options) return;
+    if (stage === STAGES.PREVIEW && file) loadPreview(file, { silent: true, opts: options });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options]);
 
   // Entry point from drop / picker / paste — branches single vs batch.
   const handleFiles = useCallback((fileList) => {
@@ -328,21 +440,23 @@ function App() {
     try {
       const fd = new FormData();
       fd.append('file', file);
+      appendOptions(fd, options);
       const res = await apiFetch('/api/convert', { method: 'POST', body: fd });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || 'Conversion failed.');
       }
+      const summary = readSummary(res);
       const blob = await res.blob();
       const outName = file.name.replace(/\.csv$/i, '_converted.csv');
       triggerDownload(blob, outName);
-      finishConvert(`Downloaded ${outName}`);
+      finishConvert(summaryText(outName, summary));
     } catch (e) {
       pushToast('error', e.message);
     } finally {
       setBusy(false);
     }
-  }, [file, busy, finishConvert, pushToast]);
+  }, [file, busy, options, finishConvert, pushToast]);
 
   // Apply user edits by POSTing the already-transformed JSON to the backend.
   const doConvertEdited = useCallback(async () => {
@@ -357,21 +471,23 @@ function App() {
           filename: outName,
           columns: preview.transformedColumns,
           rows: editedRows,
+          options,
         }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || 'Conversion failed.');
       }
+      const summary = readSummary(res);
       const blob = await res.blob();
       triggerDownload(blob, outName);
-      finishConvert(`Downloaded ${outName}`);
+      finishConvert(summaryText(outName, summary));
     } catch (e) {
       pushToast('error', e.message);
     } finally {
       setBusy(false);
     }
-  }, [file, preview, editedRows, busy, finishConvert, pushToast]);
+  }, [file, preview, editedRows, busy, options, finishConvert, pushToast]);
 
   const doConvertBatch = useCallback(async () => {
     if (batchFiles.length === 0 || busy) return;
@@ -379,6 +495,7 @@ function App() {
     try {
       const fd = new FormData();
       for (const f of batchFiles) fd.append('files', f);
+      appendOptions(fd, options);
       const res = await apiFetch('/api/convert-batch', { method: 'POST', body: fd });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -387,13 +504,13 @@ function App() {
       const summary = res.headers.get('X-Batch-Summary') || `${batchFiles.length} files`;
       const blob = await res.blob();
       triggerDownload(blob, 'converted_batch.zip');
-      finishConvert(`Batch complete — ${summary}`);
+      finishConvert(`Batch complete — ${summary} · _report.txt inside the ZIP lists what was fixed per file`);
     } catch (e) {
       pushToast('error', e.message);
     } finally {
       setBusy(false);
     }
-  }, [batchFiles, busy, finishConvert, pushToast]);
+  }, [batchFiles, busy, options, finishConvert, pushToast]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -413,6 +530,7 @@ function App() {
       }
       if (e.key === 'Escape') {
         if (showCmd) setShowCmd(false);
+        else if (showOptions) setShowOptions(false);
         else if (showHelp) setShowHelp(false);
         else if (stage !== STAGES.IDLE) reset();
       }
@@ -423,7 +541,7 @@ function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [doConvert, doConvertEdited, doConvertBatch, reset, stage, showHelp, showCmd, dirty]);
+  }, [doConvert, doConvertEdited, doConvertBatch, reset, stage, showHelp, showCmd, showOptions, dirty]);
 
   // Global drag overlay — a translucent "drop anywhere to upload" veil.
   useEffect(() => {
@@ -515,6 +633,23 @@ function App() {
       keywords: 'bug report suggest improvement idea problem',
       perform: () => setShowFeedback(true),
     });
+    cmds.push({
+      id: 'options',
+      title: 'Output options (encoding, quoting, extra columns)',
+      group: 'Options',
+      keywords: 'settings ascii bom utf-8 quote quotes extra columns group phase encoding',
+      perform: () => setShowOptions(true),
+    });
+    for (const m of OPTION_META) {
+      const on = !!options[m.key];
+      cmds.push({
+        id: `opt-${m.key}`,
+        title: `${on ? 'Disable' : 'Enable'}: ${m.label}`,
+        group: 'Options',
+        keywords: `toggle option ${m.key} ${m.label}`,
+        perform: () => setOption(m.key, !on),
+      });
+    }
     if (stage === STAGES.IDLE) {
       cmds.push({
         id: 'browse',
@@ -602,7 +737,7 @@ function App() {
       });
     }
     return cmds;
-  }, [theme, stage, dirty, query, userName, handleFiles, doConvert, doConvertEdited, doConvertBatch, revertEdits, reset]);
+  }, [theme, stage, dirty, query, userName, options, setOption, handleFiles, doConvert, doConvertEdited, doConvertBatch, revertEdits, reset]);
 
   return (
     <div className="app" data-stage={stage}>
@@ -612,6 +747,8 @@ function App() {
         onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         onHelp={() => setShowHelp(true)}
         onCmd={() => setShowCmd(true)}
+        onOptions={() => setShowOptions(true)}
+        optionsDirty={Object.keys(DEFAULT_OPTIONS).some((k) => options[k] !== DEFAULT_OPTIONS[k])}
         userName={userName}
         onChangeName={() => setShowNamePrompt(true)}
       />
@@ -674,10 +811,19 @@ function App() {
           )}
         </div>
       </main>
-      <Footer />
+      <Footer version={appVersion} />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {showConfetti && <Confetti />}
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
+      {showOptions && (
+        <OptionsModal
+          options={options}
+          onChange={setOption}
+          onReset={() => setOptions({ ...DEFAULT_OPTIONS })}
+          onClose={() => setShowOptions(false)}
+          livePreview={stage === STAGES.PREVIEW}
+        />
+      )}
       {showCmd && <CommandPalette commands={commands} onClose={() => setShowCmd(false)} />}
       {dragActive && <DragVeil active={stage === STAGES.IDLE} />}
       {userName && !showNamePrompt && (
@@ -702,7 +848,7 @@ function App() {
   );
 }
 
-function TopBar({ theme, onToggleTheme, onHelp, onCmd, userName, onChangeName }) {
+function TopBar({ theme, onToggleTheme, onHelp, onCmd, onOptions, optionsDirty, userName, onChangeName }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -721,12 +867,55 @@ function TopBar({ theme, onToggleTheme, onHelp, onCmd, userName, onChangeName })
           <span>Quick actions</span>
           <kbd>⌘K</kbd>
         </button>
+        <button className={`cmd-hint options-chip ${optionsDirty ? 'dirty' : ''}`} onClick={onOptions} title="Output options — encoding, quoting, extra columns">
+          <SlidersIcon />
+          <span>Options</span>
+          {optionsDirty && <span className="options-dot" aria-hidden="true" />}
+        </button>
         <button className="icon-btn" onClick={onHelp} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
           <HelpIcon />
         </button>
         <button className="icon-btn" onClick={onToggleTheme} aria-label="Toggle theme" title="Toggle theme">
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>
+      </div>
+    </div>
+  );
+}
+
+function OptionsModal({ options, onChange, onReset, onClose, livePreview }) {
+  const trapRef = useFocusTrap(true);
+  const isDefault = Object.keys(DEFAULT_OPTIONS).every((k) => options[k] === DEFAULT_OPTIONS[k]);
+  return (
+    <div className="name-backdrop" onClick={onClose}>
+      <div ref={trapRef} className="name-panel options-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Output options">
+        <div className="name-head">
+          <div className="name-title">Output options</div>
+          <div className="name-sub">
+            Applied to every preview and download. Saved on this browser.
+            {livePreview ? ' Changes re-run the current preview instantly.' : ''}
+          </div>
+        </div>
+        <div className="options-list">
+          {OPTION_META.map((m) => (
+            <label key={m.key} className={`option-row ${options[m.key] ? 'on' : ''}`}>
+              <input
+                type="checkbox"
+                checked={!!options[m.key]}
+                onChange={(e) => onChange(m.key, e.target.checked)}
+              />
+              <span className="option-switch" aria-hidden="true" />
+              <span className="option-text">
+                <span className="option-label">{m.label}</span>
+                <span className="option-hint">{m.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="name-actions">
+          <button type="button" className="btn ghost" onClick={onReset} disabled={isDefault}>Reset to defaults</button>
+          <button type="button" className="btn primary" onClick={onClose}>Done</button>
+        </div>
       </div>
     </div>
   );
@@ -1052,7 +1241,7 @@ function Skeleton({ filename }) {
     <div className="skeleton">
       <div className="sk-chip sk-shimmer" />
       <div className="sk-stats">
-        {Array.from({ length: 4 }).map((_, i) => <div key={i} className="sk-stat sk-shimmer" />)}
+        {Array.from({ length: 5 }).map((_, i) => <div key={i} className="sk-stat sk-shimmer" />)}
       </div>
       <div className="sk-card sk-shimmer" style={{ height: 140 }} />
       <div className="sk-card sk-shimmer" style={{ height: 280 }} />
@@ -1065,14 +1254,46 @@ function Skeleton({ filename }) {
 }
 
 function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRevert, tab, setTab, query, setQuery, onConvert, onConvertEdited, onReset }) {
-  const { rowCount, originalColumns, transformedColumns, originalPreview,
-    mapping, addedColumns, droppedColumns, truncated } = preview;
+  const {
+    rowCount = 0,
+    originalColumns = [],
+    transformedColumns = [],
+    originalPreview = [],
+    mapping = {},
+    addedColumns = [],
+    droppedColumns = [],
+    truncated = false,
+    previewLimit = 2000,
+    aliasesUsed = {},
+    skippedRows = [],
+    changes = [],
+    warnings = [],
+  } = preview || {};
 
   const fileSize = useMemo(() => formatBytes(file?.size ?? 0), [file]);
 
-  const activeRows = tab === 'converted' ? editedRows : originalPreview;
+  const activeRows = useMemo(
+    () => (tab === 'converted' ? editedRows : originalPreview) || [],
+    [tab, editedRows, originalPreview],
+  );
   const activeCols = tab === 'converted' ? transformedColumns : originalColumns;
   const editable = tab === 'converted' && !truncated;
+
+  // Lookup maps for per-cell highlighting in the converted table.
+  const changeMap = useMemo(() => {
+    const m = new Map();
+    for (const c of changes || []) {
+      if (c && typeof c.row === 'number' && c.column != null) m.set(`${c.row}|${c.column}`, c);
+    }
+    return m;
+  }, [changes]);
+  const warnMap = useMemo(() => {
+    const m = new Map();
+    for (const w of warnings || []) {
+      if (w && typeof w.row === 'number' && w.column != null) m.set(`${w.row}|${w.column}`, w);
+    }
+    return m;
+  }, [warnings]);
 
   const filteredRows = useMemo(() => {
     if (!query) return activeRows.map((r, i) => ({ r, i }));
@@ -1104,6 +1325,7 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
         shown={activeRows.length}
         inCols={originalColumns.length}
         outCols={transformedColumns.length}
+        dropped={skippedRows.length}
       />
 
       <MappingCard
@@ -1112,6 +1334,8 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
         addedColumns={addedColumns}
         droppedColumns={droppedColumns}
       />
+
+      <CleanupCard preview={preview} />
 
       <div className="card table-card">
         <div className="tabs">
@@ -1142,13 +1366,16 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
           rows={filteredRows}
           addedColumns={addedColumns}
           sourceFor={sourceFor}
+          aliasesUsed={aliasesUsed}
           isConverted={tab === 'converted'}
           editable={editable}
           onCellChange={setCell}
+          changeMap={tab === 'converted' ? changeMap : null}
+          warnMap={tab === 'converted' ? warnMap : null}
         />
         <div className="table-footnote">
           Showing {filteredRows.length} of {activeRows.length} preview rows
-          {truncated ? ` — file has ${rowCount} rows, editing available for files ≤ 500 rows` :
+          {truncated ? ` — file has ${rowCount.toLocaleString()} rows, editing available for files ≤ ${previewLimit.toLocaleString()} rows` :
             (rowCount > activeRows.length ? ` (first ${activeRows.length} of ${rowCount})` : '')}.
         </div>
       </div>
@@ -1183,13 +1410,124 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
   );
 }
 
-function StatsRow({ rowCount, shown, inCols, outCols }) {
+function StatsRow({ rowCount, shown, inCols, outCols, dropped = 0 }) {
   return (
     <div className="stats">
       <Stat label="Rows" value={rowCount} />
       <Stat label="In columns" value={inCols} />
       <Stat label="Out columns" value={outCols} />
       <Stat label="Preview rows" value={shown} />
+      <Stat label="Rows dropped" value={dropped} />
+    </div>
+  );
+}
+
+// --- Cleanup card (v2) -------------------------------------------------------
+// Shows what the backend fixed, dropped, or flagged while parsing the file.
+const CLEANUP_RENDER_CAP = 200;
+
+function CleanupCard({ preview }) {
+  const [open, setOpen] = useState(null); // 'changes' | 'skipped' | 'warnings' | null
+  const changes = preview?.changes || [];
+  const skipped = preview?.skippedRows || [];
+  const warnings = preview?.warnings || [];
+  const encoding = preview?.encoding || '';
+  const hadBom = !!preview?.hadBom;
+  const changesTruncated = !!preview?.changesTruncated;
+  const warningsTruncated = !!preview?.warningsTruncated;
+
+  const encLower = String(encoding).toLowerCase();
+  const hadMojibake = changes.some((c) => c?.kind === 'mojibake');
+  const encFixed = encLower.includes('1252') || encLower.includes('windows') || hadMojibake;
+  const encLabel = encoding
+    ? `${encLower.includes('1252') ? 'Windows-1252' : encoding}${hadBom ? ' · BOM' : ''}${encFixed ? ' → fixed' : ''}`
+    : '';
+
+  const allClean = changes.length === 0 && skipped.length === 0 && warnings.length === 0;
+  const toggle = (k) => setOpen((cur) => (cur === k ? null : k));
+
+  const renderList = (items, render, truncatedFlag) => {
+    const shown = items.slice(0, CLEANUP_RENDER_CAP);
+    const more = items.length - shown.length;
+    return (
+      <div className="cleanup-list">
+        {shown.map(render)}
+        {(more > 0 || truncatedFlag) && (
+          <div className="cleanup-more">
+            {more > 0 ? `…and ${more.toLocaleString()} more` : ''}
+            {more > 0 && truncatedFlag ? ' · ' : ''}
+            {truncatedFlag ? 'list capped by the server — download to apply everything' : ''}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="card cleanup-card">
+      <div className="card-title cleanup-title">
+        <span>Cleanup</span>
+        <span className="cleanup-sub">what changed on the way to Tigerpaw</span>
+      </div>
+      <div className="cleanup-body">
+        <div className="cleanup-pills">
+          {encLabel && (
+            <span className={`cleanup-pill info ${encFixed ? 'fixed' : ''}`} title="Detected source file encoding">
+              <span className="cleanup-pill-k">Encoding</span> {encLabel}
+            </span>
+          )}
+          {changes.length > 0 && (
+            <button className={`cleanup-pill fix ${open === 'changes' ? 'active' : ''}`} onClick={() => toggle('changes')} aria-expanded={open === 'changes'}>
+              {changes.length.toLocaleString()}{changesTruncated ? '+' : ''} cell{changes.length === 1 ? '' : 's'} fixed
+              <ChevronIcon open={open === 'changes'} />
+            </button>
+          )}
+          {skipped.length > 0 && (
+            <button className={`cleanup-pill drop ${open === 'skipped' ? 'active' : ''}`} onClick={() => toggle('skipped')} aria-expanded={open === 'skipped'}>
+              {skipped.length.toLocaleString()} row{skipped.length === 1 ? '' : 's'} dropped
+              <ChevronIcon open={open === 'skipped'} />
+            </button>
+          )}
+          {warnings.length > 0 && (
+            <button className={`cleanup-pill warn ${open === 'warnings' ? 'active' : ''}`} onClick={() => toggle('warnings')} aria-expanded={open === 'warnings'}>
+              {warnings.length.toLocaleString()}{warningsTruncated ? '+' : ''} warning{warnings.length === 1 ? '' : 's'}
+              <ChevronIcon open={open === 'warnings'} />
+            </button>
+          )}
+          {allClean && (
+            <span className="cleanup-clean"><CheckIcon /> Clean file — nothing needed changing</span>
+          )}
+        </div>
+
+        {open === 'changes' && renderList(changes, (c, i) => (
+          <div className="cleanup-row" key={`c-${i}`}>
+            <span className="cleanup-loc">Row {(c?.row ?? 0) + 1}</span>
+            <span className="cleanup-col">{c?.column}</span>
+            <span className="cleanup-diff">
+              <span className="cleanup-from">“{String(c?.from ?? '')}”</span>
+              <span className="cleanup-arrow">→</span>
+              <span className="cleanup-to">“{String(c?.to ?? '')}”</span>
+            </span>
+            <span className={`cleanup-kind kind-${c?.kind || 'other'}`}>{labelKind(c?.kind)}</span>
+          </div>
+        ), changesTruncated)}
+
+        {open === 'skipped' && renderList(skipped, (s, i) => (
+          <div className="cleanup-row" key={`s-${i}`}>
+            <span className="cleanup-loc">Row {(s?.index ?? 0) + 1}</span>
+            <span className={`cleanup-kind reason-${s?.reason || 'other'}`}>{labelReason(s?.reason)}</span>
+            <span className="cleanup-preview" title={String(s?.preview ?? '')}>{String(s?.preview ?? '') || <em>(empty)</em>}</span>
+          </div>
+        ), false)}
+
+        {open === 'warnings' && renderList(warnings, (w, i) => (
+          <div className="cleanup-row" key={`w-${i}`}>
+            <span className="cleanup-loc">{typeof w?.row === 'number' ? `Row ${w.row + 1}` : 'File'}</span>
+            <span className="cleanup-col">{w?.column || ''}</span>
+            <span className="cleanup-msg">{w?.message || labelKind(w?.kind)}</span>
+          </div>
+        ), warningsTruncated)}
+      </div>
     </div>
   );
 }
@@ -1233,11 +1571,12 @@ function MappingGroup({ color, title, items }) {
   );
 }
 
-function DataTable({ columns, rows, addedColumns, sourceFor, isConverted, editable, onCellChange }) {
+function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConverted, editable, onCellChange, changeMap, warnMap }) {
   if (rows.length === 0) {
     return <div className="table-empty">No rows match your filter.</div>;
   }
-  const added = new Set(addedColumns);
+  const added = new Set(addedColumns || []);
+  const aliases = aliasesUsed || {};
   return (
     <div className="table-scroll">
       <table className="table">
@@ -1247,12 +1586,14 @@ function DataTable({ columns, rows, addedColumns, sourceFor, isConverted, editab
               let cls = '';
               let tip = '';
               if (isConverted) {
+                const src = sourceFor[c];
                 if (added.has(c)) { cls = 'col-added'; tip = 'Added empty · Tigerpaw column'; }
-                else if (sourceFor[c] && sourceFor[c] !== c) { cls = 'col-renamed'; tip = `Renamed from: ${sourceFor[c]}`; }
-                else if (sourceFor[c]) { tip = 'Kept from source'; }
+                else if (src && aliases[src]) { cls = 'col-renamed'; tip = `Matched '${src}' → ${aliases[src]}`; }
+                else if (src && src !== c) { cls = 'col-renamed'; tip = `Renamed from: ${src}`; }
+                else if (src) { tip = 'Kept from source'; }
                 else { tip = 'Preserved extra column'; }
               } else {
-                tip = 'Source column';
+                tip = aliases[c] ? `Recognized as ${aliases[c]}` : 'Source column';
               }
               return (
                 <th key={c} className={cls} data-tip={tip}>
@@ -1265,14 +1606,20 @@ function DataTable({ columns, rows, addedColumns, sourceFor, isConverted, editab
         <tbody>
           {rows.map(({ r, i }) => (
             <tr key={i}>
-              {columns.map((c) => (
-                <EditableCell
-                  key={c}
-                  value={r[c]}
-                  editable={editable}
-                  onChange={(v) => onCellChange?.(i, c, v)}
-                />
-              ))}
+              {columns.map((c) => {
+                const change = changeMap?.get(`${i}|${c}`);
+                const warn = warnMap?.get(`${i}|${c}`);
+                return (
+                  <EditableCell
+                    key={c}
+                    value={r[c]}
+                    editable={editable}
+                    onChange={(v) => onCellChange?.(i, c, v)}
+                    change={change}
+                    warn={warn}
+                  />
+                );
+              })}
             </tr>
           ))}
         </tbody>
@@ -1281,7 +1628,7 @@ function DataTable({ columns, rows, addedColumns, sourceFor, isConverted, editab
   );
 }
 
-function EditableCell({ value, editable, onChange }) {
+function EditableCell({ value, editable, onChange, change, warn }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const ref = useRef();
@@ -1324,11 +1671,23 @@ function EditableCell({ value, editable, onChange }) {
       </td>
     );
   }
+  // Highlight cells the backend auto-fixed or flagged. Warn wins visually
+  // when both apply; the title carries the more useful detail.
+  let title = editable ? 'Click to edit' : undefined;
+  let flagCls = '';
+  if (change) {
+    flagCls = 'cell-fixed';
+    title = `Was: ${String(change.from ?? '')}${change.kind ? ` · ${labelKind(change.kind)}` : ''}`;
+  }
+  if (warn) {
+    flagCls = `${flagCls} cell-warn`.trim();
+    title = warn.message || labelKind(warn.kind);
+  }
   return (
     <td
-      className={`cell ${isEmpty ? 'empty' : ''} ${editable ? 'editable' : ''}`}
+      className={`cell ${isEmpty ? 'empty' : ''} ${editable ? 'editable' : ''} ${flagCls}`}
       onClick={start}
-      title={editable ? 'Click to edit' : undefined}
+      title={title}
     >
       {isEmpty ? '—' : String(value)}
     </td>
@@ -1480,6 +1839,8 @@ function HelpOverlay({ onClose }) {
     'Drop multiple files at once for a batch → ZIP conversion.',
     'Click any converted cell to edit before downloading.',
     'Added columns are green; renamed columns are purple.',
+    'Cells with an amber dot were auto-fixed — hover to see the original.',
+    'Options (top bar) controls encoding, quoting and extra columns.',
     'Theme preference is saved per browser.',
   ];
   return (
@@ -1629,10 +1990,13 @@ function FeedbackModal({ onClose, pushToast }) {
   );
 }
 
-function Footer() {
+function Footer({ version }) {
+  const v = version ? (String(version).startsWith('v') ? version : `v${version}`) : 'v2.0.0';
   return (
     <footer className="footer">
       <span>© {new Date().getFullYear()} Brandon Toth · Service ASAP</span>
+      <span>·</span>
+      <span className="footer-version" title="App version">{v}</span>
       <span>·</span>
       <a href="https://scribehow.com/viewer/How_to_Use_Brandons_Salesforce_To_TigerPaw_Converter__UcSaDyXrQbyyoozC531-CQ" target="_blank" rel="noopener noreferrer">How to use</a>
       <span>·</span>
@@ -1725,6 +2089,21 @@ function PencilIcon() {
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+    </svg>
+  );
+}
+function SlidersIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" />
+      <circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" />
+    </svg>
+  );
+}
+function ChevronIcon({ open }) {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

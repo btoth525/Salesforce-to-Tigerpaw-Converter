@@ -1,7 +1,7 @@
 """Salesforce → Tigerpaw CSV converter.
 
 Flask app exposing JSON APIs under ``/api/*`` and serving the React SPA from
-``frontend/dist`` at the root.
+``frontend/dist`` at the root. The CSV engine itself lives in ``converter.py``.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import io
 import ipaddress
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -23,8 +22,6 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-import chardet
-import pandas as pd
 from flask import (
     Flask,
     Response,
@@ -42,46 +39,22 @@ from flask import (
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
+import converter
+from converter import VERSION, Options
+
 
 # --- Transform rules ---------------------------------------------------------
+# The column rules and the whole parse/clean/serialize pipeline live in
+# converter.py (pure stdlib, unit-tested on its own). Re-exported here so
+# tests and external callers keep a single import point.
 
-COLUMN_MAPPING = {
-    "Product Code": "Part Number",
-    "Description": "Description",
-    "Quantity": "Quantity",
-    "Net Unit Price": "Price",
-    "Unit Cost": "Cost",
-}
-DROP_COLUMNS = ["Total Price"]
-NEW_COLUMNS = [
-    "Type",
-    "List Price",
-    "Vendor",
-    "Vendor Part number",
-    "Project Phase",
-    "Installation Location",
-    "Total Price",
-    "UOM",
-]
-DESIRED_ORDER = [
-    "Part Number",
-    "Description",
-    "Quantity",
-    "Price",
-    "Cost",
-    "Total Price",
-    "Type",
-    "List Price",
-    "UOM",
-    "Vendor",
-    "Vendor Part number",
-    "Project Phase",
-    "Installation Location",
-]
+COLUMN_MAPPING = converter.COLUMN_MAPPING
+DROP_COLUMNS = converter.DROP_COLUMNS
+NEW_COLUMNS = converter.NEW_COLUMNS
+DESIRED_ORDER = converter.DESIRED_ORDER
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB (per request)
-PREVIEW_ROWS = 500  # enough to cover typical quote exports end-to-end
-ENCODING_SNIFF_BYTES = 64 * 1024
+PREVIEW_ROWS = 2000  # rows returned (and editable) in the preview
 BATCH_MAX_FILES = 25
 
 # --- Admin / telemetry -------------------------------------------------------
@@ -460,86 +433,20 @@ def _safe_static_path(req_path: str) -> str | None:
     return candidate if os.path.isfile(candidate) else None
 
 
-# --- CSV pipeline ------------------------------------------------------------
+# --- CSV pipeline (thin wrappers over converter.py) --------------------------
 
 
-def detect_encoding(input_stream) -> str:
-    """Sniff encoding from the first chunk without loading the whole file."""
-    sample = input_stream.read(ENCODING_SNIFF_BYTES)
-    input_stream.seek(0)
-    result = chardet.detect(sample)
-    return result["encoding"] or "utf-8"
+def _request_options() -> Options:
+    """Read output options from multipart form fields or a JSON body.
 
-
-def parse_csv(input_stream, encoding: str):
-    """Try common delimiters until one yields a non-empty DataFrame."""
-    for delim in (",", ";", "\t"):
-        input_stream.seek(0)
-        try:
-            df = pd.read_csv(
-                input_stream,
-                encoding=encoding,
-                delimiter=delim,
-                skip_blank_lines=True,
-            )
-        except pd.errors.ParserError:
-            continue
-        if not df.empty:
-            return df
-    return None
-
-
-def transform_salesforce_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename, drop, add, and reorder columns per the Tigerpaw import spec."""
-    missing = [col for col in COLUMN_MAPPING if col not in df.columns]
-    if missing:
-        raise ValueError(f"Missing expected columns in CSV: {', '.join(missing)}")
-
-    df = df.rename(columns=COLUMN_MAPPING)
-    df = df.drop(columns=[c for c in DROP_COLUMNS if c in df.columns], errors="ignore")
-    for col in NEW_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    ordered = [c for c in DESIRED_ORDER if c in df.columns]
-    others = [c for c in df.columns if c not in ordered]
-    return df[ordered + others]
-
-
-def read_salesforce_csv(input_stream) -> pd.DataFrame:
-    """Detect encoding + parse, raising ValueError on empty/invalid input."""
-    encoding = detect_encoding(input_stream)
-    try:
-        df = parse_csv(input_stream, encoding)
-    except pd.errors.EmptyDataError as e:
-        raise ValueError("The uploaded CSV file is empty or could not be parsed.") from e
-    if df is None or df.empty:
-        raise ValueError("The uploaded CSV file is empty or could not be parsed.")
-    return df
-
-
-def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """Serialize a DataFrame to CSV bytes with BOM + CRLF for Excel/Tigerpaw."""
-    buffer = io.StringIO()
-    df.to_csv(buffer, index=False, encoding="utf-8-sig", lineterminator="\r\n")
-    return buffer.getvalue().encode("utf-8-sig")
-
-
-def _json_safe_records(df: pd.DataFrame, limit: int) -> list[dict]:
-    """Return up to ``limit`` rows as JSON-safe dicts (NaN → None)."""
-    head = df.head(limit)
-    records = []
-    for row in head.to_dict(orient="records"):
-        clean = {}
-        for k, v in row.items():
-            if isinstance(v, float) and math.isnan(v):
-                clean[k] = None
-            else:
-                clean[k] = v
-        records.append(clean)
-    return records
-
-
-# --- Request validation ------------------------------------------------------
+    JSON bodies may either nest them under ``options`` or put them top-level.
+    Unknown/missing keys fall back to the defaults in :class:`Options`.
+    """
+    if request.is_json:
+        body = request.get_json(silent=True) or {}
+        nested = body.get("options")
+        return Options.from_mapping(nested if isinstance(nested, dict) else body)
+    return Options.from_mapping(request.form)
 
 
 def _extract_csv_upload():
@@ -554,38 +461,40 @@ def _extract_csv_upload():
     return file, None
 
 
+def _csv_response(payload: bytes, filename: str, summary: str) -> Response:
+    return Response(
+        payload,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "text/csv; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Convert-Summary": summary,
+        },
+    )
+
+
 # --- Routes ------------------------------------------------------------------
 
 
 @app.route("/api/preview", methods=["POST"])
 def preview_route():
-    """Return a JSON preview of both the original and transformed data."""
+    """Return a JSON preview of the original and transformed data plus the
+    full cleanup log (changes, skipped rows, warnings)."""
     file, err = _extract_csv_upload()
     if err:
         return err
+    options = _request_options()
     try:
-        df = read_salesforce_csv(file.stream)
-        transformed = transform_salesforce_df(df.copy())
+        result = converter.convert_bytes(file.stream.read(), options)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    row_count = int(len(df))
-    record_event("preview", {"filename": secure_filename(file.filename), "rows": row_count})
-    return jsonify(
-        {
-            "filename": secure_filename(file.filename),
-            "originalColumns": list(df.columns),
-            "transformedColumns": list(transformed.columns),
-            "rowCount": row_count,
-            "previewLimit": PREVIEW_ROWS,
-            "truncated": row_count > PREVIEW_ROWS,
-            "originalPreview": _json_safe_records(df, PREVIEW_ROWS),
-            "transformedPreview": _json_safe_records(transformed, PREVIEW_ROWS),
-            "mapping": COLUMN_MAPPING,
-            "addedColumns": NEW_COLUMNS,
-            "droppedColumns": [c for c in DROP_COLUMNS if c in df.columns],
-        }
-    )
+    filename = secure_filename(file.filename)
+    record_event("preview", {"filename": filename, **result.summary()})
+    return jsonify(converter.preview_payload(result, filename, PREVIEW_ROWS))
 
 
 @app.route("/api/convert", methods=["POST"])
@@ -594,66 +503,57 @@ def convert_route():
     file, err = _extract_csv_upload()
     if err:
         return err
-
+    options = _request_options()
     filename = secure_filename(file.filename)
     output_filename = os.path.splitext(filename)[0] + "_converted.csv"
     try:
-        df = read_salesforce_csv(file.stream)
-        transformed = transform_salesforce_df(df)
-        payload = dataframe_to_csv_bytes(transformed)
+        result = converter.convert_bytes(file.stream.read(), options)
+        payload = result.to_csv()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    record_event("convert", {"filename": filename, "rows": int(len(df))})
-    return Response(
-        payload,
-        mimetype="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{output_filename}"',
-            "Content-Type": "text/csv; charset=utf-8",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    record_event("convert", {"filename": filename, **result.summary()})
+    return _csv_response(payload, output_filename, result.summary_json())
 
 
 @app.route("/api/convert-edited", methods=["POST"])
 def convert_edited_route():
-    """Accept already-transformed JSON rows (with user edits) and return CSV."""
+    """Accept already-transformed rows (with user edits) and return CSV.
+
+    Edited cells run through the same cleanup as file uploads so a curly
+    quote pasted into the grid can't reach the output.
+    """
     body = request.get_json(silent=True) or {}
     filename = secure_filename(body.get("filename") or "converted.csv")
     columns = body.get("columns")
     rows = body.get("rows")
-    if not isinstance(columns, list) or not columns:
-        return jsonify({"error": "`columns` must be a non-empty list."}), 400
-    if not isinstance(rows, list):
+    if not isinstance(columns, list) or not columns or not all(isinstance(c, str) for c in columns):
+        return jsonify({"error": "`columns` must be a non-empty list of strings."}), 400
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         return jsonify({"error": "`rows` must be a list of row objects."}), 400
+    options = _request_options()
 
-    # Coerce each row into a dict aligned with the requested column order;
-    # fill any missing keys with empty string so the CSV has a stable shape.
-    frame = pd.DataFrame(
-        [{c: ("" if r.get(c) is None else r.get(c)) for c in columns} for r in rows],
-        columns=columns,
-    )
-    payload = dataframe_to_csv_bytes(frame)
+    cleaned, changes, warnings = converter.clean_rows(columns, rows, options)
+    payload = converter.build_csv(columns, cleaned, options)
     output_filename = filename if filename.endswith(".csv") else filename + ".csv"
-
-    record_event("convert_edited", {"filename": output_filename, "rows": len(rows)})
-    return Response(
-        payload,
-        mimetype="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{output_filename}"',
-            "Content-Type": "text/csv; charset=utf-8",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-        },
+    summary = json.dumps(
+        {"rows": len(cleaned), "skipped": 0, "changes": len(changes),
+         "warnings": len(warnings), "encoding": "edited"},
+        separators=(",", ":"),
     )
+
+    record_event("convert_edited", {"filename": output_filename, "rows": len(rows),
+                                    "changes": len(changes), "warnings": len(warnings)})
+    return _csv_response(payload, output_filename, summary)
 
 
 @app.route("/api/convert-batch", methods=["POST"])
 def convert_batch_route():
-    """Accept multiple CSVs under the ``files`` form field and return a ZIP."""
+    """Accept multiple CSVs under the ``files`` form field and return a ZIP.
+
+    The archive always contains ``_report.txt`` (per-file cleanup summary)
+    and, when anything failed, ``_errors.txt``.
+    """
     uploads = request.files.getlist("files")
     if not uploads:
         return jsonify({"error": "No files uploaded."}), 400
@@ -662,6 +562,7 @@ def convert_batch_route():
             jsonify({"error": f"Too many files. Max {BATCH_MAX_FILES} per batch."}),
             400,
         )
+    options = _request_options()
 
     zip_buffer = io.BytesIO()
     results = []
@@ -673,12 +574,29 @@ def convert_batch_route():
                 results.append({"filename": name, "status": "skipped", "error": "not a .csv"})
                 continue
             try:
-                df = read_salesforce_csv(f.stream)
-                transformed = transform_salesforce_df(df)
-                zf.writestr(out_name, dataframe_to_csv_bytes(transformed))
-                results.append({"filename": name, "status": "ok", "rows": int(len(df))})
+                result = converter.convert_bytes(f.stream.read(), options)
+                zf.writestr(out_name, result.to_csv())
+                results.append({"filename": name, "status": "ok", "output": out_name,
+                                **result.summary()})
             except ValueError as e:
                 results.append({"filename": name, "status": "error", "error": str(e)})
+
+        report_lines = [
+            f"Salesforce -> Tigerpaw Converter v{VERSION} batch report",
+            f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            f"Options: {json.dumps(options.to_dict())}",
+            "",
+        ]
+        for r in results:
+            if r["status"] == "ok":
+                report_lines.append(
+                    f"[OK]    {r['filename']} -> {r['output']}: {r['rows']} rows, "
+                    f"{r['skipped']} rows dropped, {r['changes']} cells fixed, "
+                    f"{r['warnings']} warnings, source encoding {r['encoding']}"
+                )
+            else:
+                report_lines.append(f"[{r['status'].upper()}] {r['filename']}: {r.get('error', 'unknown')}")
+        zf.writestr("_report.txt", ("\r\n".join(report_lines) + "\r\n").encode("utf-8"))
 
         errors = [r for r in results if r["status"] != "ok"]
         if errors:
@@ -1200,7 +1118,7 @@ def _parse_iso(s: str) -> datetime:
 
 @app.route("/api/health")
 def health_route():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "version": VERSION})
 
 
 @app.route("/", defaults={"path": ""})
@@ -1228,8 +1146,15 @@ def handle_too_large(_e):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    """Always answer API calls with JSON: HTTP errors keep their status, engine
+    ValueErrors become 400, anything else is a logged 500 — never Werkzeug's
+    HTML error page."""
     if isinstance(e, HTTPException):
+        if request.path.startswith("/api/") or request.path.startswith("/admin/api/"):
+            return jsonify({"error": e.description}), e.code
         return e
+    if isinstance(e, ValueError):
+        return jsonify({"error": str(e)}), 400
     logger.exception("Unhandled exception")
     return jsonify({"error": "An unexpected error occurred."}), 500
 

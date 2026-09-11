@@ -28,7 +28,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY SalesforceToTigerpaw.py ./
+COPY SalesforceToTigerpaw.py converter.py ./
 COPY templates/ ./templates/
 COPY --from=frontend /frontend/dist ./frontend/dist
 
@@ -44,4 +44,6 @@ EXPOSE 5023
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
 
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT} --workers 2 --timeout 60 SalesforceToTigerpaw:app"]
+# `exec` makes gunicorn PID 1 so `docker stop` delivers SIGTERM to it and the
+# workers drain gracefully (v1 left `sh` as PID 1, so every stop was a SIGKILL / exit 137).
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT} --workers 2 --timeout 60 --graceful-timeout 20 SalesforceToTigerpaw:app"]
