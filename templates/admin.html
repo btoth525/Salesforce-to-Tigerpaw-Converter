@@ -154,6 +154,15 @@
       renderBreakdown('breakdown-browsers', data.browsers);
       renderBreakdown('breakdown-oses', data.oses);
     }
+    // v2 engine events carry cleanup counts; older rows simply lack them.
+    function cleanupBits(d) {
+      const bits = [];
+      if (d.changes) bits.push(`${d.changes} fixed`);
+      if (d.skipped) bits.push(`${d.skipped} dropped`);
+      if (d.warnings) bits.push(`<span style="color:#f59e0b">${d.warnings} warn</span>`);
+      if (d.encoding && d.encoding !== 'utf-8' && d.encoding !== 'utf-8-sig' && d.encoding !== 'edited') bits.push(escapeHtml(d.encoding));
+      return bits.length ? ' · ' + bits.join(' · ') : '';
+    }
     function renderBreakdown(id, rows) {
       const total = rows.reduce((a, r) => a + r.count, 0) || 1;
       const el = document.getElementById(id);
@@ -175,7 +184,7 @@
         const d = e.details || {};
         let detail;
         if (e.type === 'convert' || e.type === 'preview' || e.type === 'convert_edited') {
-          detail = `<code>${escapeHtml(d.filename || '?')}</code> · ${d.rows ?? '?'} rows`;
+          detail = `<code>${escapeHtml(d.filename || '?')}</code> · ${d.rows ?? '?'} rows` + cleanupBits(d);
         } else if (e.type === 'convert_batch') {
           detail = `<code>${d.files ?? '?'} files</code> · ${d.ok ?? '?'} ok, ${d.failed ?? 0} failed`;
         } else if (e.type === 'identify') {
@@ -261,7 +270,7 @@
                       const d = e.details || {};
                       const detail = (e.type === 'convert_batch'
                         ? `${d.files ?? '?'} files · ${d.ok ?? '?'} ok, ${d.failed ?? 0} failed`
-                        : (d.filename ? `<code>${escapeHtml(d.filename)}</code> · ${d.rows ?? '?'} rows` : escapeHtml(JSON.stringify(d))));
+                        : (d.filename ? `<code>${escapeHtml(d.filename)}</code> · ${d.rows ?? '?'} rows` + cleanupBits(d) : escapeHtml(JSON.stringify(d))));
                       return `<div class="event-row">
                         <span class="event-pill" data-type="${escapeHtml(e.type)}">${escapeHtml(e.type)}</span>
                         <div><span class="event-details">${detail}</span><div class="event-meta">${escapeHtml(e.ip || '')}</div></div>

@@ -25,7 +25,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # --- Transform rules ---------------------------------------------------------
 
@@ -743,6 +743,8 @@ def preview_payload(result: ConvertResult, filename: str, limit: int) -> dict:
         "skippedRows": [s.to_dict() for s in parse.skipped],
         "changes": [c.to_dict() for c in changes[:MAX_LOG_ENTRIES]],
         "warnings": [w.to_dict() for w in warnings[:MAX_LOG_ENTRIES]],
+        "changesTotal": len(changes),
+        "warningsTotal": len(warnings),
         "changesTruncated": len(changes) > MAX_LOG_ENTRIES,
         "warningsTruncated": len(warnings) > MAX_LOG_ENTRIES,
         "options": result.options.to_dict(),

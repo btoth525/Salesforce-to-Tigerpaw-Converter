@@ -585,3 +585,43 @@ class AdminExportAndDeleteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardeningTests(unittest.TestCase):
+    def setUp(self):
+        import SalesforceToTigerpaw as m
+        m._login_failures.clear()
+        self.client = app.test_client()
+
+    def test_security_headers_present(self):
+        r = self.client.get("/api/health")
+        self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(r.headers["X-Frame-Options"], "DENY")
+
+    def test_admin_login_throttles_after_five_failures(self):
+        for _ in range(5):
+            r = self.client.post("/admin/login", data={"password": "wrong"})
+            self.assertEqual(r.status_code, 401)
+        r = self.client.post("/admin/login", data={"password": "wrong"})
+        self.assertEqual(r.status_code, 429)
+        # Even the correct password is refused while locked out.
+        r = self.client.post("/admin/login", data={"password": os.environ["ADMIN_PASSWORD"]})
+        self.assertEqual(r.status_code, 429)
+
+    def test_successful_login_clears_failures(self):
+        self.client.post("/admin/login", data={"password": "wrong"})
+        r = self.client.post("/admin/login", data={"password": os.environ["ADMIN_PASSWORD"]})
+        self.assertEqual(r.status_code, 302)
+        import SalesforceToTigerpaw as m
+        self.assertEqual(m._login_failures, {})
+
+    def test_preview_reports_uncapped_totals(self):
+        nl = chr(10)
+        rows = nl.join(f'"P{i}","Item {chr(8217)}{i}{chr(8217)}","1","1.00","0.50"' for i in range(2100))
+        data = ('"Product Code","Description","Quantity","Net Unit Price","Unit Cost"' + nl + rows + nl).encode("utf-8")
+        r = self.client.post("/api/preview", data={"file": (io.BytesIO(data), "big.csv")},
+                             content_type="multipart/form-data")
+        body = r.get_json()
+        self.assertEqual(body["changesTotal"], 2100)
+        self.assertLessEqual(len(body["changes"]), 2000)
+        self.assertTrue(body["changesTruncated"])

@@ -410,7 +410,40 @@ def _log_end(response: Response) -> Response:
             response.status_code,
             ms,
         )
+    # Baseline hardening headers; the app is reachable from the internet via
+    # the Cloudflare tunnel, so don't rely on the LAN for these.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     return response
+
+
+# --- Admin login throttle ----------------------------------------------------
+# The admin page is internet-facing, so brute-forcing the password must be slow.
+# Per-process in-memory (two gunicorn workers => two independent counters, still
+# a >100x slowdown versus unlimited attempts).
+
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_blocked(ip: str) -> int:
+    """Seconds the caller must still wait, or 0 if attempts are allowed."""
+    now = time.monotonic()
+    recent = [t for t in _login_failures.get(ip, []) if now - t < LOGIN_LOCKOUT_SECONDS]
+    _login_failures[ip] = recent
+    if len(recent) >= LOGIN_MAX_FAILURES:
+        return int(LOGIN_LOCKOUT_SECONDS - (now - recent[0])) + 1
+    return 0
+
+
+def _login_failed(ip: str) -> None:
+    _login_failures.setdefault(ip, []).append(time.monotonic())
+
+
+def _login_succeeded(ip: str) -> None:
+    _login_failures.pop(ip, None)
 
 
 def _safe_static_path(req_path: str) -> str | None:
@@ -766,13 +799,23 @@ def admin_login():
         if session.get(ADMIN_SESSION_KEY):
             return redirect(url_for("admin_dashboard"))
         return render_template("admin_login.html", error=None)
+    ip = _client_ip()
+    wait = _login_blocked(ip)
+    if wait:
+        logger.warning("throttled admin login from %s (%ss left)", ip, wait)
+        return render_template(
+            "admin_login.html",
+            error=f"Too many attempts. Try again in {max(1, wait // 60)} min.",
+        ), 429
     submitted = request.form.get("password", "")
     if secrets.compare_digest(submitted, app.config["ADMIN_PASSWORD"]):
+        _login_succeeded(ip)
         session.permanent = True
         session[ADMIN_SESSION_KEY] = True
-        logger.info("admin login from %s", _client_ip())
+        logger.info("admin login from %s", ip)
         return redirect(url_for("admin_dashboard"))
-    logger.warning("failed admin login from %s", _client_ip())
+    _login_failed(ip)
+    logger.warning("failed admin login from %s", ip)
     return render_template("admin_login.html", error="Incorrect password."), 401
 
 

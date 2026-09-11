@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-09-10
+### Added
+- **Verdict strip** at the top of the preview: green "Ready for Tigerpaw" with the row / fixed / dropped counts, or amber "Review N warnings" with a one-click filter to those rows. Download button lives in the strip and in a sticky bottom bar.
+- **Table upgrades**: 100-row pages with a pager, filter chips (All / Fixed / Warnings), sticky header, frozen Part Number column, wider Description, right-aligned numbers.
+- **Success screen**: summary line, *Download again*, *Copy CSV to clipboard*.
+- **Collapsible Transformation card** (auto-collapses after the second preview) and a collapsible "How do I export from Salesforce?" reminder on the idle page.
+- **Admin**: event feed shows fixed / dropped / warning counts and non-UTF-8 encodings per conversion; login throttled to 5 failures per 15 minutes per IP; `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` headers.
+- `/api/preview` returns uncapped `changesTotal` / `warningsTotal`.
+### Fixed
+- Stats now Rows · Cells fixed · Rows dropped · Warnings · Out columns.
+- Amber "fixed" dot no longer overlaps cell text.
+- Cleanup pill showed "2,000+ cells fixed" on large files; it now shows the real total.
+
 ## [2.0.0] - 2026-09-10
 ### Why
 Converted files were reaching Tigerpaw with garbled characters, blanked cells,

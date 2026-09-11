@@ -81,6 +81,35 @@ const SKIP_REASON_LABELS = {
 const labelKind = (k) => CHANGE_KIND_LABELS[k] || (k ? String(k).replace(/_/g, ' ') : 'Changed');
 const labelReason = (r) => SKIP_REASON_LABELS[r] || (r ? String(r).replace(/_/g, ' ') : 'Dropped');
 
+// Tigerpaw columns that hold numbers — right-aligned with tabular digits.
+const NUMERIC_COLUMNS = new Set(['Quantity', 'Price', 'Cost', 'Total Price', 'List Price']);
+const PAGE_SIZE = 100;
+
+// Uncapped totals (v2.1 backend) with a fallback to the capped list length so
+// an older backend still renders sensible counts.
+const totalChanges = (p) => (typeof p?.changesTotal === 'number' ? p.changesTotal : (p?.changes || []).length);
+const totalWarnings = (p) => (typeof p?.warningsTotal === 'number' ? p.warningsTotal : (p?.warnings || []).length);
+
+const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+
+// The Transformation card is useful the first couple of times, then it is
+// the same static block on every file — collapse it after that.
+const MAPPING_OPEN_KEY = 'csv-forge-mapping-open';
+function readMappingOpen() {
+  try {
+    const raw = localStorage.getItem(MAPPING_OPEN_KEY);
+    if (raw === 'true' || raw === 'false') return raw === 'true';
+    const seen = parseInt(raw || '0', 10) || 0;
+    localStorage.setItem(MAPPING_OPEN_KEY, String(seen + 1));
+    return seen < 2;
+  } catch {
+    return true;
+  }
+}
+function writeMappingOpen(v) {
+  try { localStorage.setItem(MAPPING_OPEN_KEY, v ? 'true' : 'false'); } catch { /* ignore */ }
+}
+
 // --- Error boundary ---------------------------------------------------------
 // Catches render/commit errors anywhere in the tree so a crash shows a helpful
 // fallback instead of a blank page.
@@ -245,6 +274,8 @@ function App() {
   const [showOptions, setShowOptions] = useState(false);
   const [options, setOptions] = useState(() => loadOptions());
   const [appVersion, setAppVersion] = useState('');
+  // Last produced download — lets the success card re-download / copy it.
+  const [lastResult, setLastResult] = useState(null); // { blob, name, summary, kind: 'csv'|'zip' }
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   useEffect(() => {
@@ -336,6 +367,7 @@ function App() {
     setBatchFiles([]);
     setQuery('');
     setEditedRows(null);
+    setLastResult(null);
   }, []);
 
   // `silent` re-runs the preview in place (used when an output option changes)
@@ -450,6 +482,7 @@ function App() {
       const blob = await res.blob();
       const outName = file.name.replace(/\.csv$/i, '_converted.csv');
       triggerDownload(blob, outName);
+      setLastResult({ blob, name: outName, summary, kind: 'csv' });
       finishConvert(summaryText(outName, summary));
     } catch (e) {
       pushToast('error', e.message);
@@ -481,6 +514,7 @@ function App() {
       const summary = readSummary(res);
       const blob = await res.blob();
       triggerDownload(blob, outName);
+      setLastResult({ blob, name: outName, summary, kind: 'csv' });
       finishConvert(summaryText(outName, summary));
     } catch (e) {
       pushToast('error', e.message);
@@ -504,6 +538,7 @@ function App() {
       const summary = res.headers.get('X-Batch-Summary') || `${batchFiles.length} files`;
       const blob = await res.blob();
       triggerDownload(blob, 'converted_batch.zip');
+      setLastResult({ blob, name: 'converted_batch.zip', summary: { batch: summary }, kind: 'zip' });
       finishConvert(`Batch complete — ${summary} · _report.txt inside the ZIP lists what was fixed per file`);
     } catch (e) {
       pushToast('error', e.message);
@@ -767,6 +802,7 @@ function App() {
             <>
               <HeroStats />
               <DropZone onFiles={handleFiles} />
+              <ExportHelp />
               <TeamWall currentUser={userName} pushToast={pushToast} />
             </>
           )}
@@ -806,7 +842,9 @@ function App() {
           {stage === STAGES.DONE && (
             <SuccessCard
               filename={file?.name || (batchFiles.length ? `${batchFiles.length} files` : '')}
+              result={lastResult}
               onAgain={reset}
+              pushToast={pushToast}
             />
           )}
         </div>
@@ -1271,6 +1309,14 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
   } = preview || {};
 
   const fileSize = useMemo(() => formatBytes(file?.size ?? 0), [file]);
+  const nChanges = totalChanges(preview);
+  const nWarnings = totalWarnings(preview);
+  const nSkipped = skippedRows.length;
+
+  // Row filter chips (All / Fixed / Warnings) + pagination live here so the
+  // absolute preview index survives filtering and paging.
+  const [rowFilter, setRowFilter] = useState('all'); // 'all' | 'fixed' | 'warn'
+  const [page, setPage] = useState(0);
 
   const activeRows = useMemo(
     () => (tab === 'converted' ? editedRows : originalPreview) || [],
@@ -1279,29 +1325,55 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
   const activeCols = tab === 'converted' ? transformedColumns : originalColumns;
   const editable = tab === 'converted' && !truncated;
 
-  // Lookup maps for per-cell highlighting in the converted table.
-  const changeMap = useMemo(() => {
+  // Lookup maps for per-cell highlighting in the converted table, plus the
+  // set of rows touched by each so the chips can filter.
+  const { changeMap, changedRowSet } = useMemo(() => {
     const m = new Map();
+    const rows = new Set();
     for (const c of changes || []) {
-      if (c && typeof c.row === 'number' && c.column != null) m.set(`${c.row}|${c.column}`, c);
+      if (c && typeof c.row === 'number' && c.column != null) { m.set(`${c.row}|${c.column}`, c); rows.add(c.row); }
     }
-    return m;
+    return { changeMap: m, changedRowSet: rows };
   }, [changes]);
-  const warnMap = useMemo(() => {
+  const { warnMap, warnedRowSet } = useMemo(() => {
     const m = new Map();
+    const rows = new Set();
     for (const w of warnings || []) {
-      if (w && typeof w.row === 'number' && w.column != null) m.set(`${w.row}|${w.column}`, w);
+      if (w && typeof w.row === 'number') {
+        rows.add(w.row);
+        if (w.column != null) m.set(`${w.row}|${w.column}`, w);
+      }
     }
-    return m;
+    return { warnMap: m, warnedRowSet: rows };
   }, [warnings]);
 
   const filteredRows = useMemo(() => {
-    if (!query) return activeRows.map((r, i) => ({ r, i }));
-    const q = query.toLowerCase();
-    return activeRows
-      .map((r, i) => ({ r, i }))
-      .filter(({ r }) => Object.values(r).some((v) => v != null && String(v).toLowerCase().includes(q)));
-  }, [activeRows, query]);
+    const q = query.trim().toLowerCase();
+    const out = [];
+    for (let i = 0; i < activeRows.length; i++) {
+      if (rowFilter === 'fixed' && !changedRowSet.has(i)) continue;
+      if (rowFilter === 'warn' && !warnedRowSet.has(i)) continue;
+      const r = activeRows[i];
+      if (q && !Object.values(r).some((v) => v != null && String(v).toLowerCase().includes(q))) continue;
+      out.push({ r, i });
+    }
+    return out;
+  }, [activeRows, query, rowFilter, changedRowSet, warnedRowSet]);
+
+  // Reset paging whenever the visible set changes shape.
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  useEffect(() => { setPage(0); }, [query, rowFilter, tab, filteredRows.length]);
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = useMemo(
+    () => filteredRows.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE),
+    [filteredRows, safePage],
+  );
+  const isFiltered = !!query.trim() || rowFilter !== 'all';
+  const firstShown = filteredRows.length === 0 ? 0 : safePage * PAGE_SIZE + 1;
+  const lastShown = Math.min(filteredRows.length, (safePage + 1) * PAGE_SIZE);
+
+  // Chips only make sense on the converted tab (that's where fixes live).
+  const showWarnings = useCallback(() => { setTab('converted'); setRowFilter('warn'); }, [setTab]);
 
   // For converted-column tooltips: reverse-lookup the source column.
   const sourceFor = useMemo(() => {
@@ -1309,6 +1381,29 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
     for (const [src, dst] of Object.entries(mapping)) m[dst] = src;
     return m;
   }, [mapping]);
+
+  const downloadButtons = (glow) => (
+    <>
+      <button
+        className={`btn ${dirty ? '' : `primary ${glow ? 'glow' : ''}`}`}
+        onClick={onConvert}
+        title="⌘/Ctrl+Enter"
+        disabled={busy}
+      >
+        {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download as-is</>}
+      </button>
+      {dirty && (
+        <button
+          className={`btn primary ${glow ? 'glow' : ''}`}
+          onClick={onConvertEdited}
+          title="⌘/Ctrl+Enter"
+          disabled={busy}
+        >
+          {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download edited</>}
+        </button>
+      )}
+    </>
+  );
 
   return (
     <div className="preview">
@@ -1320,12 +1415,21 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
         <button className="file-chip-x" onClick={onReset} aria-label="Remove file">✕</button>
       </div>
 
+      <VerdictStrip
+        rows={rowCount}
+        changes={nChanges}
+        skipped={nSkipped}
+        warnings={nWarnings}
+        onShowWarnings={showWarnings}
+        actions={downloadButtons(false)}
+      />
+
       <StatsRow
         rowCount={rowCount}
-        shown={activeRows.length}
-        inCols={originalColumns.length}
+        fixed={nChanges}
+        dropped={nSkipped}
+        warnings={nWarnings}
         outCols={transformedColumns.length}
-        dropped={skippedRows.length}
       />
 
       <MappingCard
@@ -1351,6 +1455,17 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
               <PencilIcon /> <span>Cells are editable</span>
             </div>
           )}
+          {tab === 'converted' && (
+            <div className="row-chips" role="group" aria-label="Row filter">
+              <button className={`row-chip ${rowFilter === 'all' ? 'active' : ''}`} aria-pressed={rowFilter === 'all'} aria-label="Show all rows" onClick={() => setRowFilter('all')}>All</button>
+              <button className={`row-chip fix ${rowFilter === 'fixed' ? 'active' : ''}`} aria-pressed={rowFilter === 'fixed'} aria-label={`Show only rows with fixed cells (${changedRowSet.size})`} onClick={() => setRowFilter('fixed')} disabled={changedRowSet.size === 0}>
+                Fixed <span className="chip">{changedRowSet.size.toLocaleString()}</span>
+              </button>
+              <button className={`row-chip warn ${rowFilter === 'warn' ? 'active' : ''}`} aria-pressed={rowFilter === 'warn'} aria-label={`Show only rows with warnings (${warnedRowSet.size})`} onClick={() => setRowFilter('warn')} disabled={warnedRowSet.size === 0}>
+                Warnings <span className="chip">{warnedRowSet.size.toLocaleString()}</span>
+              </button>
+            </div>
+          )}
           <div className="search">
             <SearchIcon />
             <input
@@ -1358,12 +1473,13 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
               placeholder="Filter rows…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="Filter rows"
             />
           </div>
         </div>
         <DataTable
           columns={activeCols}
-          rows={filteredRows}
+          rows={pageRows}
           addedColumns={addedColumns}
           sourceFor={sourceFor}
           aliasesUsed={aliasesUsed}
@@ -1372,52 +1488,79 @@ function PreviewPanel({ file, preview, editedRows, setCell, dirty, busy, onRever
           onCellChange={setCell}
           changeMap={tab === 'converted' ? changeMap : null}
           warnMap={tab === 'converted' ? warnMap : null}
+          emptyMessage={rowFilter !== 'all' && !query ? 'No rows in this filter.' : 'No rows match your filter.'}
         />
         <div className="table-footnote">
-          Showing {filteredRows.length} of {activeRows.length} preview rows
-          {truncated ? ` — file has ${rowCount.toLocaleString()} rows, editing available for files ≤ ${previewLimit.toLocaleString()} rows` :
-            (rowCount > activeRows.length ? ` (first ${activeRows.length} of ${rowCount})` : '')}.
+          <span>
+            {filteredRows.length === 0
+              ? `0 of ${activeRows.length.toLocaleString()} rows`
+              : `Showing rows ${firstShown.toLocaleString()}–${lastShown.toLocaleString()} of ${activeRows.length.toLocaleString()}`}
+            {isFiltered ? ` (filtered: ${filteredRows.length.toLocaleString()})` : ''}
+            {truncated ? ` — file has ${rowCount.toLocaleString()} rows, editing available for files ≤ ${previewLimit.toLocaleString()} rows` : ''}
+          </span>
+          {pageCount > 1 && (
+            <div className="pager" role="navigation" aria-label="Table pages">
+              <button className="pager-btn" onClick={() => setPage(0)} disabled={safePage === 0} aria-label="First page">«</button>
+              <button className="pager-btn" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0} aria-label="Previous page">‹</button>
+              <span className="pager-label">{safePage + 1} / {pageCount}</span>
+              <button className="pager-btn" onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1} aria-label="Next page">›</button>
+              <button className="pager-btn" onClick={() => setPage(pageCount - 1)} disabled={safePage >= pageCount - 1} aria-label="Last page">»</button>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="actions">
+      <div className="actions sticky-actions">
         <button className="btn ghost" onClick={onReset} disabled={busy}>← Back</button>
         {dirty && (
           <button className="btn ghost" onClick={onRevert} title="Discard edits" disabled={busy}>
             Revert edits
           </button>
         )}
-        <button
-          className={`btn ${dirty ? '' : 'primary glow'}`}
-          onClick={onConvert}
-          title="⌘/Ctrl+Enter"
-          disabled={busy}
-        >
-          {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download as-is</>}
-        </button>
-        {dirty && (
-          <button
-            className="btn primary glow"
-            onClick={onConvertEdited}
-            title="⌘/Ctrl+Enter"
-            disabled={busy}
-          >
-            {busy ? <><span className="spinner sm inline" /> Converting…</> : <><DownloadIcon /> Download edited</>}
-          </button>
-        )}
+        {downloadButtons(true)}
       </div>
     </div>
   );
 }
 
-function StatsRow({ rowCount, shown, inCols, outCols, dropped = 0 }) {
+// One-line answer to "can I import this?" — sits right under the file chip
+// with the download button, so the common case is a single glance + click.
+function VerdictStrip({ rows, changes, skipped, warnings, onShowWarnings, actions }) {
+  const ok = warnings === 0;
+  let text;
+  if (!ok) {
+    text = `Review ${plural(warnings, 'warning')} before importing`;
+  } else {
+    const parts = [];
+    parts.push(plural(rows, 'row'));
+    if (changes > 0) parts.push(`${changes.toLocaleString()} cell${changes === 1 ? '' : 's'} auto-fixed`);
+    if (skipped > 0) parts.push(`${plural(skipped, 'row')} dropped`);
+    text = changes === 0 && skipped === 0
+      ? 'Ready for Tigerpaw — clean file, nothing needed changing'
+      : `Ready for Tigerpaw — ${parts.join(', ')}`;
+  }
+  return (
+    <div className={`verdict ${ok ? 'ok' : 'warn'}`} role="status">
+      <div className="verdict-left">
+        <span className="verdict-icon" aria-hidden="true">{ok ? <CheckIcon /> : <WarnIcon />}</span>
+        <span className="verdict-text">{text}</span>
+        {!ok && (
+          <button className="btn ghost sm verdict-show" onClick={onShowWarnings}>Show</button>
+        )}
+      </div>
+      <div className="verdict-actions">{actions}</div>
+    </div>
+  );
+}
+
+function StatsRow({ rowCount, fixed = 0, dropped = 0, warnings = 0, outCols }) {
   return (
     <div className="stats">
       <Stat label="Rows" value={rowCount} />
-      <Stat label="In columns" value={inCols} />
+      <Stat label="Cells fixed" value={fixed} tone={fixed > 0 ? 'fix' : ''} />
+      <Stat label="Rows dropped" value={dropped} tone={dropped > 0 ? 'drop' : ''} />
+      <Stat label="Warnings" value={warnings} tone={warnings > 0 ? 'warn' : ''} />
       <Stat label="Out columns" value={outCols} />
-      <Stat label="Preview rows" value={shown} />
-      <Stat label="Rows dropped" value={dropped} />
     </div>
   );
 }
@@ -1435,6 +1578,8 @@ function CleanupCard({ preview }) {
   const hadBom = !!preview?.hadBom;
   const changesTruncated = !!preview?.changesTruncated;
   const warningsTruncated = !!preview?.warningsTruncated;
+  const nChanges = totalChanges(preview);
+  const nWarnings = totalWarnings(preview);
 
   const encLower = String(encoding).toLowerCase();
   const hadMojibake = changes.some((c) => c?.kind === 'mojibake');
@@ -1443,7 +1588,7 @@ function CleanupCard({ preview }) {
     ? `${encLower.includes('1252') ? 'Windows-1252' : encoding}${hadBom ? ' · BOM' : ''}${encFixed ? ' → fixed' : ''}`
     : '';
 
-  const allClean = changes.length === 0 && skipped.length === 0 && warnings.length === 0;
+  const allClean = nChanges === 0 && skipped.length === 0 && nWarnings === 0;
   const toggle = (k) => setOpen((cur) => (cur === k ? null : k));
 
   const renderList = (items, render, truncatedFlag) => {
@@ -1456,7 +1601,7 @@ function CleanupCard({ preview }) {
           <div className="cleanup-more">
             {more > 0 ? `…and ${more.toLocaleString()} more` : ''}
             {more > 0 && truncatedFlag ? ' · ' : ''}
-            {truncatedFlag ? 'list capped by the server — download to apply everything' : ''}
+            {truncatedFlag ? `showing the first ${items.length.toLocaleString()} — every one is applied in the download` : ''}
           </div>
         )}
       </div>
@@ -1476,9 +1621,9 @@ function CleanupCard({ preview }) {
               <span className="cleanup-pill-k">Encoding</span> {encLabel}
             </span>
           )}
-          {changes.length > 0 && (
+          {nChanges > 0 && (
             <button className={`cleanup-pill fix ${open === 'changes' ? 'active' : ''}`} onClick={() => toggle('changes')} aria-expanded={open === 'changes'}>
-              {changes.length.toLocaleString()}{changesTruncated ? '+' : ''} cell{changes.length === 1 ? '' : 's'} fixed
+              {plural(nChanges, 'cell')} fixed
               <ChevronIcon open={open === 'changes'} />
             </button>
           )}
@@ -1488,9 +1633,9 @@ function CleanupCard({ preview }) {
               <ChevronIcon open={open === 'skipped'} />
             </button>
           )}
-          {warnings.length > 0 && (
+          {nWarnings > 0 && (
             <button className={`cleanup-pill warn ${open === 'warnings' ? 'active' : ''}`} onClick={() => toggle('warnings')} aria-expanded={open === 'warnings'}>
-              {warnings.length.toLocaleString()}{warningsTruncated ? '+' : ''} warning{warnings.length === 1 ? '' : 's'}
+              {plural(nWarnings, 'warning')}
               <ChevronIcon open={open === 'warnings'} />
             </button>
           )}
@@ -1532,10 +1677,10 @@ function CleanupCard({ preview }) {
   );
 }
 
-function Stat({ label, value }) {
+function Stat({ label, value, tone = '' }) {
   const animated = useCountUp(value);
   return (
-    <div className="stat">
+    <div className={`stat ${tone ? `stat-${tone}` : ''}`}>
       <div className="stat-value">{typeof value === 'number' ? animated.toLocaleString() : value}</div>
       <div className="stat-label">{label}</div>
     </div>
@@ -1543,17 +1688,26 @@ function Stat({ label, value }) {
 }
 
 function MappingCard({ mapping, originalColumns, addedColumns, droppedColumns }) {
+  const [open, setOpen] = useState(() => readMappingOpen());
   const renames = Object.entries(mapping).filter(([src, dst]) => src !== dst && originalColumns.includes(src));
   const kept = Object.entries(mapping).filter(([src, dst]) => src === dst && originalColumns.includes(src));
+  const toggle = () => setOpen((v) => { writeMappingOpen(!v); return !v; });
+  const summary = `${renames.length} renamed · ${kept.length} kept · ${addedColumns.length} added · ${droppedColumns.length} dropped`;
   return (
-    <div className="card mapping-card">
-      <div className="card-title">Transformation</div>
-      <div className="mapping-grid">
-        <MappingGroup color="rename" title={`Renamed (${renames.length})`} items={renames.map(([s, d]) => `${s} → ${d}`)} />
-        <MappingGroup color="keep" title={`Kept (${kept.length})`} items={kept.map(([s]) => s)} />
-        <MappingGroup color="add" title={`Added (${addedColumns.length})`} items={addedColumns} />
-        <MappingGroup color="drop" title={`Dropped (${droppedColumns.length})`} items={droppedColumns} />
-      </div>
+    <div className={`card mapping-card ${open ? 'open' : 'closed'}`}>
+      <button className="card-title mapping-head" onClick={toggle} aria-expanded={open} aria-controls="mapping-grid">
+        <span>Transformation</span>
+        <span className="mapping-summary">{summary}</span>
+        <ChevronIcon open={open} />
+      </button>
+      {open && (
+        <div className="mapping-grid" id="mapping-grid">
+          <MappingGroup color="rename" title={`Renamed (${renames.length})`} items={renames.map(([s, d]) => `${s} → ${d}`)} />
+          <MappingGroup color="keep" title={`Kept (${kept.length})`} items={kept.map(([s]) => s)} />
+          <MappingGroup color="add" title={`Added (${addedColumns.length})`} items={addedColumns} />
+          <MappingGroup color="drop" title={`Dropped (${droppedColumns.length})`} items={droppedColumns} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1571,32 +1725,34 @@ function MappingGroup({ color, title, items }) {
   );
 }
 
-function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConverted, editable, onCellChange, changeMap, warnMap }) {
+function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConverted, editable, onCellChange, changeMap, warnMap, emptyMessage }) {
   if (rows.length === 0) {
-    return <div className="table-empty">No rows match your filter.</div>;
+    return <div className="table-empty">{emptyMessage || 'No rows match your filter.'}</div>;
   }
   const added = new Set(addedColumns || []);
   const aliases = aliasesUsed || {};
+  // Column classes: the first column is frozen, numeric columns right-align.
+  const colClass = (c, idx) => `${idx === 0 ? 'col-first' : ''} ${isConverted && NUMERIC_COLUMNS.has(c) ? 'num' : ''} ${c === 'Description' ? 'col-desc' : ''}`.trim();
   return (
     <div className="table-scroll">
       <table className="table">
         <thead>
           <tr>
-            {columns.map((c) => {
-              let cls = '';
+            {columns.map((c, idx) => {
+              let cls = colClass(c, idx);
               let tip = '';
               if (isConverted) {
                 const src = sourceFor[c];
-                if (added.has(c)) { cls = 'col-added'; tip = 'Added empty · Tigerpaw column'; }
-                else if (src && aliases[src]) { cls = 'col-renamed'; tip = `Matched '${src}' → ${aliases[src]}`; }
-                else if (src && src !== c) { cls = 'col-renamed'; tip = `Renamed from: ${src}`; }
+                if (added.has(c)) { cls += ' col-added'; tip = 'Added empty · Tigerpaw column'; }
+                else if (src && aliases[src]) { cls += ' col-renamed'; tip = `Matched '${src}' → ${aliases[src]}`; }
+                else if (src && src !== c) { cls += ' col-renamed'; tip = `Renamed from: ${src}`; }
                 else if (src) { tip = 'Kept from source'; }
                 else { tip = 'Preserved extra column'; }
               } else {
                 tip = aliases[c] ? `Recognized as ${aliases[c]}` : 'Source column';
               }
               return (
-                <th key={c} className={cls} data-tip={tip}>
+                <th key={c} className={cls.trim()} data-tip={tip}>
                   <span>{c}</span>
                 </th>
               );
@@ -1606,7 +1762,7 @@ function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConv
         <tbody>
           {rows.map(({ r, i }) => (
             <tr key={i}>
-              {columns.map((c) => {
+              {columns.map((c, idx) => {
                 const change = changeMap?.get(`${i}|${c}`);
                 const warn = warnMap?.get(`${i}|${c}`);
                 return (
@@ -1617,6 +1773,7 @@ function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConv
                     onChange={(v) => onCellChange?.(i, c, v)}
                     change={change}
                     warn={warn}
+                    extraClass={colClass(c, idx)}
                   />
                 );
               })}
@@ -1628,7 +1785,7 @@ function DataTable({ columns, rows, addedColumns, sourceFor, aliasesUsed, isConv
   );
 }
 
-function EditableCell({ value, editable, onChange, change, warn }) {
+function EditableCell({ value, editable, onChange, change, warn, extraClass = '' }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const ref = useRef();
@@ -1656,7 +1813,7 @@ function EditableCell({ value, editable, onChange, change, warn }) {
   const isEmpty = value === null || value === undefined || value === '';
   if (editing) {
     return (
-      <td className="cell editing">
+      <td className={`cell editing ${extraClass}`}>
         <input
           ref={ref}
           className="cell-input"
@@ -1683,24 +1840,89 @@ function EditableCell({ value, editable, onChange, change, warn }) {
     flagCls = `${flagCls} cell-warn`.trim();
     title = warn.message || labelKind(warn.kind);
   }
+  // The text sits in its own span so the flag dot (absolutely positioned in
+  // the td's corner) never overlaps the value.
   return (
     <td
-      className={`cell ${isEmpty ? 'empty' : ''} ${editable ? 'editable' : ''} ${flagCls}`}
+      className={`cell ${isEmpty ? 'empty' : ''} ${editable ? 'editable' : ''} ${flagCls} ${extraClass}`}
       onClick={start}
       title={title}
     >
-      {isEmpty ? '—' : String(value)}
+      <span className="cell-text">{isEmpty ? '—' : String(value)}</span>
     </td>
   );
 }
 
-function SuccessCard({ filename, onAgain }) {
+function SuccessCard({ filename, result, onAgain, pushToast }) {
+  const [copying, setCopying] = useState(false);
+  const outName = result?.name || (filename ? filename.replace(/\.csv$/i, '_converted.csv') : '');
+  const s = result?.summary;
+  const summaryBits = [];
+  if (s && typeof s.rows === 'number') summaryBits.push(plural(s.rows, 'row'));
+  if (s && s.changes > 0) summaryBits.push(`${s.changes.toLocaleString()} cell${s.changes === 1 ? '' : 's'} fixed`);
+  if (s && s.skipped > 0) summaryBits.push(`${plural(s.skipped, 'row')} dropped`);
+  if (s && s.warnings > 0) summaryBits.push(`${plural(s.warnings, 'warning')}`);
+  if (s && s.batch) summaryBits.push(String(s.batch));
+
+  const again = () => {
+    if (!result?.blob) return;
+    triggerDownload(result.blob, result.name);
+    pushToast?.('success', `Downloaded ${result.name} again`);
+  };
+  const copy = async () => {
+    if (!result?.blob || copying) return;
+    setCopying(true);
+    try {
+      const text = await result.blob.text();
+      await navigator.clipboard.writeText(text.replace(/^\uFEFF/, ''));
+      pushToast?.('success', 'CSV copied to clipboard — paste it into Excel or Tigerpaw');
+    } catch {
+      pushToast?.('error', 'Clipboard blocked by the browser — use Download again instead.');
+    } finally {
+      setCopying(false);
+    }
+  };
+
   return (
     <div className="card success-card">
       <div className="success-check"><CheckIcon /></div>
       <div className="success-title">Converted!</div>
-      <div className="success-sub">{filename ? `${filename} → ${filename.replace(/\.csv$/i, '_converted.csv')}` : 'Download started.'}</div>
-      <button className="btn primary" onClick={onAgain}>Convert another</button>
+      <div className="success-sub">{filename ? `${filename} → ${outName || 'download'}` : 'Download started.'}</div>
+      {summaryBits.length > 0 && (
+        <div className="success-summary">{summaryBits.join(' · ')}</div>
+      )}
+      <div className="success-actions">
+        {result?.blob && (
+          <button className="btn ghost" onClick={again} title="Save the same file again">
+            <DownloadIcon /> Download again
+          </button>
+        )}
+        {result?.blob && result.kind === 'csv' && (
+          <button className="btn ghost" onClick={copy} disabled={copying} title="Copy the converted CSV text">
+            <CopyIcon /> {copying ? 'Copying…' : 'Copy CSV to clipboard'}
+          </button>
+        )}
+        <button className="btn primary" onClick={onAgain}>Convert another</button>
+      </div>
+    </div>
+  );
+}
+
+// Three-step reminder for teammates who export from Salesforce rarely.
+function ExportHelp() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`export-help ${open ? 'open' : ''}`}>
+      <button className="export-help-toggle" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <HelpIcon /> How do I export from Salesforce? <ChevronIcon open={open} />
+      </button>
+      {open && (
+        <ol className="export-help-steps">
+          <li>Open the quote line items report → <strong>Export</strong>.</li>
+          <li>Choose <strong>Details Only</strong>, Format <strong>CSV</strong>, Encoding <strong>UTF-8</strong> (or leave the default — every encoding is handled).</li>
+          <li>Drop the downloaded <code>report….csv</code> here.</li>
+        </ol>
+      )}
     </div>
   );
 }
@@ -1840,6 +2062,7 @@ function HelpOverlay({ onClose }) {
     'Click any converted cell to edit before downloading.',
     'Added columns are green; renamed columns are purple.',
     'Cells with an amber dot were auto-fixed — hover to see the original.',
+    'Use the Fixed / Warnings chips above the table to see only the rows that changed.',
     'Options (top bar) controls encoding, quoting and extra columns.',
     'Theme preference is saved per browser.',
   ];
@@ -2097,6 +2320,22 @@ function SlidersIcon() {
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" />
       <circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" />
+    </svg>
+  );
+}
+function WarnIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4M12 17h.01" />
+    </svg>
+  );
+}
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </svg>
   );
 }

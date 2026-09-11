@@ -1,6 +1,6 @@
 # Salesforce → Tigerpaw CSV Converter
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 [![Publish Docker image to GHCR](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/btoth525/Salesforce-to-Tigerpaw-Converter/actions/workflows/docker-publish.yml)
 
@@ -18,6 +18,7 @@ A production-ready Flask + React web app that turns Salesforce CSV exports into 
 ## Highlights
 
 - **Preview before you commit** — side-by-side original ↔ converted tables with row search and hover-tooltips explaining every column change.
+- **Ready-for-Tigerpaw verdict** — one green or amber line telling you whether the file is safe to import, with the download button right there.
 - **Cleanup report** — encoding badge, every changed cell (before → after, reason), every dropped row, and warnings such as non-numeric quantities. Fixed cells are highlighted in the table; hover shows the original value.
 - **Output options** — plain-ASCII text, UTF-8 BOM, quote-all, keep extra columns, map quote-line Group → Project Phase. Persisted per browser.
 - **Drag one file or drop ten** — single files go to the preview stage; 2+ files auto-route to a batch view that streams back a ZIP.
@@ -280,7 +281,7 @@ The Vite dev server proxies `/api/*` to Flask, so you hit the React UI at
 ### Tests + lint
 
 ```bash
-python -m unittest                  # 100 tests, ~0.3s
+python -m unittest                  # 104 tests, ~0.4s
 cd frontend && npm run lint         # eslint
 cd frontend && npm run build        # production bundle
 ```
@@ -299,7 +300,7 @@ cd frontend && npm run build        # production bundle
 | `GET`  | `/api/public-stats` | Public totals + top-5 weekly leaderboard (safe to display on the idle page). |
 | `GET`/`POST` | `/api/notes` | Team wall — read recent notes, post a new one (280 char max). |
 | `POST` | `/api/feedback` | Submit a suggestion or issue (requires a real `X-User-Name`, 2 000 char max). |
-| `GET`  | `/api/health` | `{"status":"ok","version":"2.0.0"}` — used by the container HEALTHCHECK. |
+| `GET`  | `/api/health` | `{"status":"ok","version":"2.1.0"}` — used by the container HEALTHCHECK. |
 | `GET`  | `/` and `/<path>` | Serves the React SPA. |
 
 All endpoints accept `multipart/form-data` or JSON and return `400` JSON with an `error` key on bad input. Max upload: 10 MB; max files per batch: 25.
