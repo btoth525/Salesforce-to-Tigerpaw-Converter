@@ -27,7 +27,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.1"
+VERSION = "0.3.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "tp_agent_config.json")
 LOG_PATH = os.path.join(HERE, "tp_agent.log")
@@ -260,10 +260,31 @@ def tool_screenshot(args):
             gdi32.DeleteDC(hdc_mem)
     finally:
         user32.ReleaseDC(0, hdc_screen)
+    # Downscale (nearest neighbor) — a full 2560px 32-bit BMP is ~17MB of
+    # base64, which chokes the tunnel transfer. Default max width 1400.
+    max_w = int(args.get("max_width", 1400))
+    step = 1
+    if w > max_w:
+        step = -(-w // max_w)  # ceil
+    ow, oh = w // step, h // step
+    if step > 1:
+        out = bytearray(ow * oh * 4)
+        for oy in range(oh):
+            srow = (oy * step) * w * 4
+            orow = oy * ow * 4
+            for ox in range(ow):
+                s = srow + (ox * step) * 4
+                d = orow + ox * 4
+                out[d:d + 4] = pixels[s:s + 4]
+        pixels = bytes(out)
+    else:
+        ow, oh = w, h
+    bmi.biWidth = ow
+    bmi.biHeight = -oh
     file_header = struct.pack("<2sIHHI", b"BM", 14 + 40 + len(pixels),
                               0, 0, 14 + 40)
     bmp = file_header + bytes(bmi) + pixels
-    return {"width": w, "height": h, "format": "bmp",
+    return {"width": ow, "height": oh, "format": "bmp",
             "image_base64": base64.b64encode(bmp).decode("ascii")}
 
 
@@ -345,6 +366,358 @@ def tool_ping(args):
     }
 
 
+# --------------------------------------------------------------------------
+# HWND-level Win32 control tools (v0.3): direct window messages, no pixels.
+# WM_GETTEXT / WM_SETTEXT are marshalled by the OS across processes.
+# Pointer-carrying messages (CB_GETLBTEXT) go through memory allocated
+# inside the target process (VirtualAllocEx + ReadProcessMemory).
+# --------------------------------------------------------------------------
+kernel32 = ctypes.windll.kernel32
+
+_WM_SETTEXT = 0x000C
+_WM_GETTEXT = 0x000D
+_WM_GETTEXTLENGTH = 0x000E
+_WM_COMMAND = 0x0111
+_BM_CLICK = 0x00F5
+_BM_GETCHECK = 0x00F0
+_BM_SETCHECK = 0x00F1
+_CB_GETCOUNT = 0x0146
+_CB_GETLBTEXT = 0x0148
+_CB_GETLBTEXTLEN = 0x0149
+_CB_SETCURSEL = 0x014E
+_SMTO_ABORTIFHUNG = 0x0002
+
+user32.SendMessageTimeoutW.argtypes = [
+    wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM, wt.UINT, wt.UINT,
+    ctypes.POINTER(ctypes.c_size_t)]
+user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+kernel32.OpenProcess.restype = ctypes.c_void_p
+kernel32.VirtualAllocEx.restype = ctypes.c_void_p
+
+
+def _send_t(hwnd, msg, wp=0, lp=0, timeout=2000):
+    res = ctypes.c_size_t(0)
+    r = user32.SendMessageTimeoutW(hwnd, msg, wp, lp, _SMTO_ABORTIFHUNG,
+                                   timeout, ctypes.byref(res))
+    if not r:
+        raise OSError("control %s did not answer msg 0x%04x" % (hwnd, msg))
+    return res.value
+
+
+def _win_text(hwnd):
+    try:
+        n = _send_t(hwnd, _WM_GETTEXTLENGTH, 0, 0, 800)
+    except OSError:
+        return None
+    if n <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(n + 2)
+    try:
+        _send_t(hwnd, _WM_GETTEXT, n + 2,
+                ctypes.cast(buf, ctypes.c_void_p).value, 800)
+    except OSError:
+        return None
+    return buf.value
+
+
+def _class_name(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def tool_win_tree(args):
+    needle = str(args.get("title_contains", "")).lower()
+    root_hwnd = None
+    for win in _enum_windows():
+        if needle in win["title"].lower():
+            root_hwnd = win["hwnd"]
+            break
+    if root_hwnd is None:
+        raise ValueError("no top window title contains %r" % needle)
+    found = []
+
+    CB = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, ctypes.c_void_p)
+
+    def cb(hwnd, _lp):
+        depth = 0
+        p = user32.GetParent(hwnd)
+        seen = set()
+        while p and p != root_hwnd and depth < 30 and p not in seen:
+            seen.add(p)
+            depth += 1
+            p = user32.GetParent(p)
+        rect = wt.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        found.append({
+            "hwnd": int(hwnd),
+            "parent": int(user32.GetParent(hwnd) or 0),
+            "depth": depth + 1,
+            "class": _class_name(hwnd),
+            "text": _win_text(hwnd),
+            "id": int(user32.GetDlgCtrlID(hwnd)),
+            "visible": bool(user32.IsWindowVisible(hwnd)),
+            "enabled": bool(user32.IsWindowEnabled(hwnd)),
+            "rect": [rect.left, rect.top, rect.right, rect.bottom],
+        })
+        return True
+
+    user32.EnumChildWindows(root_hwnd, CB(cb), 0)
+    return {"root": root_hwnd, "controls": found}
+
+
+def tool_get_text(args):
+    hwnd = int(args["hwnd"])
+    return {"hwnd": hwnd, "text": _win_text(hwnd)}
+
+
+def tool_set_text(args):
+    hwnd = int(args["hwnd"])
+    text = str(args.get("text", ""))
+    buf = ctypes.create_unicode_buffer(text)
+    _send_t(hwnd, _WM_SETTEXT, 0,
+            ctypes.cast(buf, ctypes.c_void_p).value, 3000)
+    if args.get("notify", True):
+        parent = user32.GetParent(hwnd)
+        if parent:
+            cid = int(user32.GetDlgCtrlID(hwnd))
+            cls = _class_name(hwnd).lower()
+            notif = 5 if "combo" in cls else 0x0300  # CBN_EDITCHANGE / EN_CHANGE
+            user32.PostMessageW(parent, _WM_COMMAND,
+                                (notif << 16) | (cid & 0xFFFF), hwnd)
+    return {"hwnd": hwnd, "text": _win_text(hwnd)}
+
+
+def tool_click_ctl(args):
+    hwnd = int(args["hwnd"])
+    cls = _class_name(hwnd)
+    if "button" in cls.lower():
+        _send_t(hwnd, _BM_CLICK, 0, 0, 3000)
+        return {"hwnd": hwnd, "clicked": "BM_CLICK"}
+    rect = wt.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(rect))
+    cx = (rect.right - rect.left) // 2
+    cy = (rect.bottom - rect.top) // 2
+    lp = (cy << 16) | (cx & 0xFFFF)
+    user32.PostMessageW(hwnd, 0x0201, 1, lp)   # WM_LBUTTONDOWN
+    user32.PostMessageW(hwnd, 0x0202, 0, lp)   # WM_LBUTTONUP
+    return {"hwnd": hwnd, "clicked": "mouse-post", "class": cls}
+
+
+def tool_check_state(args):
+    hwnd = int(args["hwnd"])
+    return {"hwnd": hwnd, "state": int(_send_t(hwnd, _BM_GETCHECK))}
+
+
+def tool_set_check(args):
+    hwnd = int(args["hwnd"])
+    want = 1 if args.get("checked", True) else 0
+    _send_t(hwnd, _BM_SETCHECK, want, 0)
+    return {"hwnd": hwnd, "state": int(_send_t(hwnd, _BM_GETCHECK))}
+
+
+def _combo_items(hwnd):
+    pid = wt.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    proc = kernel32.OpenProcess(0x0400 | 0x0008 | 0x0010 | 0x0020,
+                                 False, pid.value)
+    if not proc:
+        raise OSError("OpenProcess failed for pid %s" % pid.value)
+    items = []
+    try:
+        count = _send_t(hwnd, _CB_GETCOUNT)
+        if count > 10000:
+            raise ValueError("combo count implausible: %s" % count)
+        for i in range(count):
+            ln = _send_t(hwnd, _CB_GETLBTEXTLEN, i, 0)
+            size = (ln + 2) * 2
+            addr = kernel32.VirtualAllocEx(proc, None, size, 0x3000, 4)
+            if not addr:
+                raise OSError("VirtualAllocEx failed")
+            try:
+                _send_t(hwnd, _CB_GETLBTEXT, i, addr)
+                buf = ctypes.create_string_buffer(size)
+                read = ctypes.c_size_t(0)
+                kernel32.ReadProcessMemory(proc, addr, buf, size,
+                                           ctypes.byref(read))
+                items.append(buf.raw[:ln * 2].decode("utf-16-le",
+                                                     errors="replace"))
+            finally:
+                kernel32.VirtualFreeEx(proc, addr, 0, 0x8000)
+    finally:
+        kernel32.CloseHandle(proc)
+    return items
+
+
+def tool_combo_items(args):
+    hwnd = int(args["hwnd"])
+    items = _combo_items(hwnd)
+    cur = _win_text(hwnd)
+    return {"hwnd": hwnd, "count": len(items), "items": items,
+            "current_text": cur}
+
+
+def tool_combo_select(args):
+    hwnd = int(args["hwnd"])
+    items = _combo_items(hwnd)
+    idx = args.get("index")
+    if idx is None:
+        want = str(args.get("text", "")).lower()
+        idx = -1
+        for i, it in enumerate(items):
+            if it.lower() == want:
+                idx = i
+                break
+        if idx < 0:
+            for i, it in enumerate(items):
+                if it.lower().startswith(want):
+                    idx = i
+                    break
+        if idx < 0:
+            raise ValueError("no combo item matches %r" % args.get("text"))
+    idx = int(idx)
+    _send_t(hwnd, _CB_SETCURSEL, idx, 0)
+    parent = user32.GetParent(hwnd)
+    if parent:
+        cid = int(user32.GetDlgCtrlID(hwnd))
+        user32.PostMessageW(parent, _WM_COMMAND,
+                            (5 << 16) | (cid & 0xFFFF), hwnd)  # CBN_SELCHANGE
+    return {"hwnd": hwnd, "selected_index": idx,
+            "selected": items[idx] if 0 <= idx < len(items) else None,
+            "current_text": _win_text(hwnd)}
+
+
+# --------------------------------------------------------------------------
+# ListView tools (v0.3.1): LVITEM structs marshalled through memory
+# allocated in the target process. The target is a 32-bit VB6 process,
+# so LVITEM uses the 32-bit ANSI layout (pszText at offset 20).
+# --------------------------------------------------------------------------
+_LVM_GETITEMCOUNT = 0x1004
+_LVM_INSERTITEMA = 0x1007
+_LVM_GETHEADER = 0x101F
+_LVM_GETITEMTEXTA = 0x102D
+_LVM_SETITEMTEXTA = 0x102E
+_HDM_GETITEMCOUNT = 0x1200
+
+
+class _Remote(object):
+    def __init__(self, hwnd):
+        pid = wt.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        self.proc = kernel32.OpenProcess(0x0400 | 0x0008 | 0x0010 | 0x0020,
+                                         False, pid.value)
+        if not self.proc:
+            raise OSError("OpenProcess failed for pid %s" % pid.value)
+        self.addrs = []
+
+    def alloc(self, data):
+        if isinstance(data, int):
+            size, blob = data, None
+        else:
+            size, blob = len(data), data
+        addr = kernel32.VirtualAllocEx(self.proc, None, max(size, 1),
+                                       0x3000, 4)
+        if not addr:
+            raise OSError("VirtualAllocEx failed")
+        self.addrs.append(addr)
+        if blob:
+            self.write(addr, blob)
+        return addr
+
+    def write(self, addr, data):
+        written = ctypes.c_size_t(0)
+        buf = ctypes.create_string_buffer(data, len(data))
+        if not kernel32.WriteProcessMemory(self.proc, addr, buf, len(data),
+                                           ctypes.byref(written)):
+            raise OSError("WriteProcessMemory failed")
+
+    def read(self, addr, size):
+        buf = ctypes.create_string_buffer(size)
+        got = ctypes.c_size_t(0)
+        if not kernel32.ReadProcessMemory(self.proc, addr, buf, size,
+                                          ctypes.byref(got)):
+            raise OSError("ReadProcessMemory failed")
+        return buf.raw[:got.value]
+
+    def close(self):
+        for a in self.addrs:
+            kernel32.VirtualFreeEx(self.proc, a, 0, 0x8000)
+        kernel32.CloseHandle(self.proc)
+
+
+def _lvitem(remote, iitem, isub, text_addr, text_max=0):
+    raw = bytearray(48)
+    struct.pack_into("<I", raw, 0, 1)            # mask = LVIF_TEXT
+    struct.pack_into("<i", raw, 4, iitem)
+    struct.pack_into("<i", raw, 8, isub)
+    struct.pack_into("<I", raw, 20, text_addr)   # pszText (32-bit ptr)
+    struct.pack_into("<i", raw, 24, text_max)
+    return remote.alloc(bytes(raw))
+
+
+def _list_col_count(hwnd):
+    header = _send_t(hwnd, _LVM_GETHEADER)
+    if not header:
+        return 0
+    return int(_send_t(header, _HDM_GETITEMCOUNT))
+
+
+def tool_list_info(args):
+    hwnd = int(args["hwnd"])
+    return {"hwnd": hwnd,
+            "count": int(_send_t(hwnd, _LVM_GETITEMCOUNT)),
+            "columns": _list_col_count(hwnd)}
+
+
+def tool_list_insert(args):
+    hwnd = int(args["hwnd"])
+    texts = [str(t) for t in args.get("texts", [])]
+    if not texts:
+        raise ValueError("texts required")
+    remote = _Remote(hwnd)
+    try:
+        idx = args.get("index")
+        if idx is None:
+            idx = int(_send_t(hwnd, _LVM_GETITEMCOUNT))
+        t0 = remote.alloc(texts[0].encode("mbcs", errors="replace") + b"\x00")
+        item = _lvitem(remote, int(idx), 0, t0)
+        newidx = _send_t(hwnd, _LVM_INSERTITEMA, 0, item, 3000)
+        if newidx > 0x7FFFFFFF:
+            raise OSError("LVM_INSERTITEM failed")
+        for j, t in enumerate(texts[1:], start=1):
+            ta = remote.alloc(t.encode("mbcs", errors="replace") + b"\x00")
+            it = _lvitem(remote, int(newidx), j, ta)
+            _send_t(hwnd, _LVM_SETITEMTEXTA, int(newidx), it, 3000)
+        return {"hwnd": hwnd, "index": int(newidx),
+                "count": int(_send_t(hwnd, _LVM_GETITEMCOUNT))}
+    finally:
+        remote.close()
+
+
+def tool_list_items(args):
+    hwnd = int(args["hwnd"])
+    cols = _list_col_count(hwnd) or 1
+    cols = min(cols, int(args.get("max_cols", 16)))
+    rows = int(_send_t(hwnd, _LVM_GETITEMCOUNT))
+    rows = min(rows, int(args.get("max_rows", 50)))
+    remote = _Remote(hwnd)
+    try:
+        out = []
+        buf = remote.alloc(1024)
+        for i in range(rows):
+            row = []
+            for j in range(cols):
+                item = _lvitem(remote, i, j, buf, 1023)
+                _send_t(hwnd, _LVM_GETITEMTEXTA, i, item, 3000)
+                raw = remote.read(buf, 1024)
+                row.append(raw.split(b"\x00")[0].decode("mbcs",
+                                                        errors="replace"))
+            out.append(row)
+        return {"hwnd": hwnd, "rows": out}
+    finally:
+        remote.close()
+
+
 TOOLS = {
     "ping": tool_ping,
     "screenshot": tool_screenshot,
@@ -355,6 +728,17 @@ TOOLS = {
     "focus_window": tool_focus_window,
     "foreground": tool_foreground,
     "run_ps": tool_run_ps,
+    "win_tree": tool_win_tree,
+    "get_text": tool_get_text,
+    "set_text": tool_set_text,
+    "click_ctl": tool_click_ctl,
+    "check_state": tool_check_state,
+    "set_check": tool_set_check,
+    "combo_items": tool_combo_items,
+    "combo_select": tool_combo_select,
+    "list_info": tool_list_info,
+    "list_insert": tool_list_insert,
+    "list_items": tool_list_items,
 }
 
 

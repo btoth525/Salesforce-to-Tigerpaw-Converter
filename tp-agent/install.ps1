@@ -1,4 +1,4 @@
-# tp-agent installer v4 - runs on the TigerPaw server under the owner's Windows account.
+# tp-agent installer v5 - runs on the TigerPaw server under the owner's Windows account.
 # NO ADMIN ANYWHERE. Transport: a NAMED Cloudflare tunnel on the owner's own domain
 # (same pattern as his other rigs). The agent binds 127.0.0.1 only; cloudflared runs
 # as the owner at logon and dials OUT to Cloudflare. No inbound ports.
@@ -94,7 +94,20 @@ $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interac
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
 try { Stop-ScheduledTask -TaskName 'tp-agent' -ErrorAction SilentlyContinue } catch {}
-Start-Sleep -Seconds 1
+# Stop-ScheduledTask is ASYNC: if the old python still holds the port, the new
+# instance exits on bind (or Start is ignored) and the agent dies minutes after
+# a "healthy" check. Wait until the port is really free before re-registering.
+$busy = $true
+for ($i = 0; $i -lt 20; $i++) {
+  $busy = [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+  if (-not $busy) { break }
+  Start-Sleep -Seconds 1
+}
+if ($busy) {
+  Stat 'port still busy after stop - killing the stale agent python'
+  Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $pyExe } | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+}
 try {
   $action = New-ScheduledTaskAction -Execute $pyExe -Argument 'tp_agent.py' -WorkingDirectory $Base
   Register-ScheduledTask -TaskName 'tp-agent' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
@@ -114,6 +127,12 @@ if (Test-Path $TokFile) {
   $tunnelToken = (Get-Content $TokFile -Raw).Trim()
 }
 try { Stop-ScheduledTask -TaskName 'tp-tunnel' -ErrorAction SilentlyContinue } catch {}
+# Same async-stop trap as the agent: wait for the old cloudflared to exit.
+for ($i = 0; $i -lt 10; $i++) {
+  $cf = Get-Process cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $CfExe }
+  if (-not $cf) { break }
+  Start-Sleep -Seconds 1
+}
 if ($tunnelToken -and $tunnelToken.Length -gt 50 -and (Test-Path $CfExe)) {
   try {
     $cfArgs = "tunnel --no-autoupdate run --token $tunnelToken"
