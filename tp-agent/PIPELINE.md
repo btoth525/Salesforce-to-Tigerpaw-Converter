@@ -131,18 +131,20 @@ see "Teach mode" below — and Papi verified every step + fixed the penny.)
   rows. Capture the TigerPaw quote number from the Quotes grid.
 
 ## Penny fix (after import, when totals differ by $0.01)
-- Diff Salesforce line nets (cpq_read_quote) against CSV qty × price per
-  line; the offender is the line whose SF net is $0.01 above the product
-  (Q-02168: Installation - Trim Out Devices, 47 × $145.00 = $6,815.00 vs
-  SF $6,815.01).
+- Brandon's rule (2026-10-21): the adjustment goes on a PART, never on a
+  labor line — labor rates stay exactly as quoted. Diff Salesforce line
+  nets (cpq_read_quote) against CSV qty × price to find the total gap
+  (Q-02168: Trim Out Devices 47 × $145.00 = $6,815.00 vs SF $6,815.01 —
+  leave that labor line untouched).
+- Pick a qty-1 PART line (Q-02168: AL - AL600ULACM power supply) and move
+  its unit price by the gap: $539.97 → $539.98 for +$0.01.
 - In the quote grid (CSV order; rows ~19px pitch — the Permit row, #11,
   double-clicked at ~(1357,724) in the 3412×931 session), double-click the
-  offending row → "Quote Item Detail" dialog.
-- Set the unit-price textbox (dialog-relative ~(1550,553)) to a 4-decimal
-  value whose extension rounds UP to the SF net — 47 × 145.0003 =
-  6,815.014 → $6,815.01. set_text accepts the 4 decimals; read back, OK.
+  part's row → "Quote Item Detail" dialog → set the unit-price textbox
+  (dialog-relative ~(1550,553)) via set_text → read back → OK.
 - Header total must now equal the Salesforce total exactly. Save (floppy)
-  → OK the print notice. Verified on Q-02168: $46,056.17 → $46,056.18.
+  → OK the print notice. Verified on Q-02168: $46,056.17 → $46,056.18
+  with Trim Out back at exactly $145.00 and the penny on the power supply.
 
 ## Teach mode (how Step 5 was learned)
 - teach_logger.py (in this folder): POLLING recorder — foreground window,
