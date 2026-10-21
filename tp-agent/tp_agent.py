@@ -27,13 +27,13 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "tp_agent_config.json")
 LOG_PATH = os.path.join(HERE, "tp_agent.log")
 
 try:
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
+    with open(CFG_PATH, "r", encoding="utf-8-sig") as f:
         CFG = json.load(f)
 except Exception:
     CFG = {}

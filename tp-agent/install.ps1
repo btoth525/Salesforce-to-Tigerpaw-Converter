@@ -76,7 +76,7 @@ if (-not $token) {
 } else {
   Stat 'existing valid token kept'
 }
-@{ token = $token; port = $Port; bind = '127.0.0.1' } | ConvertTo-Json | Set-Content $CfgPath -Encoding UTF8
+@{ token = $token; port = $Port; bind = '127.0.0.1' } | ConvertTo-Json | Set-Content $CfgPath -Encoding ASCII
 Stat 'config written (bind 127.0.0.1, localhost only)'
 
 # --- cloudflared (single exe, no admin, outbound only) ---
