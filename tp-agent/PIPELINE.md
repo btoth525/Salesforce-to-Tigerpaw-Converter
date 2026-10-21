@@ -143,8 +143,15 @@ see "Teach mode" below — and Papi verified every step + fixed the penny.)
   part's row → "Quote Item Detail" dialog → set the unit-price textbox
   (dialog-relative ~(1550,553)) via set_text → read back → OK.
 - Header total must now equal the Salesforce total exactly. Save (floppy)
-  → OK the print notice. Verified on Q-02168: $46,056.17 → $46,056.18
-  with Trim Out back at exactly $145.00 and the penny on the power supply.
+  → OK the print notice.
+- **Verify AFTER the save, not just before it**: TigerPaw can reprice
+  imported lines when the quote saves/reloads (Q-02168, 2026-10-21:
+  Program/Testing snapped $175.01 → $175.00 book rate = −$0.16, and the
+  Misc plug ticked +$0.01 → total drifted $46,056.18 → $46,056.03).
+  If it drifted, true it up AGAIN on the same part (AL ended at $540.13
+  = $539.97 + $0.01 penny + $0.15 snap coverage) and re-verify post-save
+  until the saved total holds at the Salesforce number. Labor stays
+  untouched even when TigerPaw's snap is what moved the total.
 
 ## Teach mode (how Step 5 was learned)
 - teach_logger.py (in this folder): POLLING recorder — foreground window,
