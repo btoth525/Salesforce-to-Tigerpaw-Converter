@@ -27,7 +27,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "tp_agent_config.json")
 LOG_PATH = os.path.join(HERE, "tp_agent.log")
@@ -39,6 +39,7 @@ except Exception:
     CFG = {}
 TOKEN = str(CFG.get("token", ""))
 PORT = int(CFG.get("port", 8799))
+BIND = str(CFG.get("bind", "127.0.0.1"))
 
 _log_lock = threading.Lock()
 
@@ -418,9 +419,9 @@ def main():
         log("FATAL: no token in config; refusing to start")
         print("tp-agent: no token configured in tp_agent_config.json")
         return 2
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    log("tp-agent v%s listening on 0.0.0.0:%d (pid %d)"
-        % (VERSION, PORT, os.getpid()))
+    server = ThreadingHTTPServer((BIND, PORT), Handler)
+    log("tp-agent v%s listening on %s:%d (pid %d)"
+        % (VERSION, BIND, PORT, os.getpid()))
     print("tp-agent v%s listening on port %d" % (VERSION, PORT))
     try:
         server.serve_forever()
