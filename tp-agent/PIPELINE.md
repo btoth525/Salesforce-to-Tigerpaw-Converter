@@ -48,8 +48,11 @@ Salesforce quote Q-02168). Everything below is verified live unless marked OPEN.
 - Run Brandon's converter (Salesforce-to-Tigerpaw-Converter, converter.py,
   keep_extras=False) → 13-column CSV. Hand-built/modified CSVs FAIL
   TigerPaw's import — converter output only, unmodified.
-- Known artifact: sub-cent unit rates round down (Q-02168 lands at
-  $46,056.17 in TigerPaw vs $46,056.18 in Salesforce). Flag it, don't fix it.
+- Known artifact: a line whose Salesforce net carries a sub-cent fraction
+  (usually a plugin-quantity labor line) imports a penny short (Q-02168:
+  $46,056.17 in TigerPaw vs $46,056.18 in Salesforce). Fix it in TigerPaw
+  after the import — see the penny-fix step in Step 5. Brandon wants the
+  totals to match exactly.
 - Stage the file on the server: C:\Users\btoth\tp-agent\<QuoteNo>_tigerpaw.csv
   via run_ps base64 write; verify byte length matches.
 
@@ -94,17 +97,63 @@ the app formats numbers itself: (281) 335-8000.
 - Verify: account header "Updated by Brandon Toth <today> <time>", Vendor
   state 0, phones list rows, SI text — all re-read AFTER the save.
 
-## Step 5 — create the TigerPaw quote + import the CSV  [OPEN]
-- ImportWizard.exe is MASTER DATA ONLY (templates: Accounts, Price Book,
-  Vendor…) — not the quote path.
-- In-app: account ribbon → Quotes → "Quotes and Opportunities for <acct>"
-  window → New Quote → "Quote Templates" picker — the list was EMPTY on
-  2026-10-21. OPEN QUESTION for Brandon: how he starts a quote (template
-  name? different entry point? does an import flow create the quote?).
-- Once a quote shell exists: find its import (expected: quote editor's
-  import using the converter CSV), run it, then verify line count = CSV
-  rows and Net Sale = CSV total (expect the known penny rounding).
-- Fill this section in with the proven clicks the first time it succeeds.
+## Step 5 — create the TigerPaw quote + import the CSV
+(Proven 2026-10-21: Brandon performed it once under the teach recorder —
+see "Teach mode" below — and Papi verified every step + fixed the penny.)
+- ImportWizard.exe is MASTER DATA ONLY (Accounts, Price Book, Vendor…) —
+  NOT the quote path. The quote import lives inside the quote form.
+- Create: account ribbon → Quotes → "Quotes and Opportunities for <acct>"
+  → New Quote → "Quote Templates" picker opens (the list can look empty —
+  proceed; Brandon clicked through its toolbar/OK area) → the account's
+  Special Instructions popup may appear (dismiss it) → the
+  opportunity/quote form opens with the description pre-filled with the
+  Salesforce opp name.
+- Description: prefix it "SF Q-<quote number> " (Brandon typed the prefix
+  and pasted the number; final form: "SF Q- 02168TechTrans International,
+  Inc.- Houston - Access Control,Cameras - Rhombus"). For automation,
+  set_text the description combo's Edit child to
+  "SF Q-<num> <opp name>" directly.
+- A Yes/No dialog can appear during creation — Brandon answered **No**.
+- "Specify Opportunity Source" dialog: pick the source in the combo → OK.
+  (Which value Brandon picked wasn't captured by the recorder — confirm
+  once, then always use it.)
+- Import: in the quote form, the menu/popup command **"Import Quote from
+  Generic Text File"** → dialog → browse (…) → file picker titled
+  "Generic quote text file" → select C:\Users\btoth\tp-agent\<QuoteNo>_tigerpaw.csv
+  → Open → then set: ✓ "First line contains column names (do not import)",
+  ◉ "Add the imported items to the current quote", ✓ "Import the selling
+  prices", ✓ "Import the costs" → OK. Lines land in CSV order.
+- Save: toolbar floppy **Save** (main toolbar, ~5th icon; Brandon's own
+  final click). Expect the informational notice "This quote cannot be
+  printed until it is approved." → OK. Do NOT approve in TigerPaw unless
+  Brandon says so.
+- Verify: header total textbox == Salesforce net_total, line count == CSV
+  rows. Capture the TigerPaw quote number from the Quotes grid.
+
+## Penny fix (after import, when totals differ by $0.01)
+- Diff Salesforce line nets (cpq_read_quote) against CSV qty × price per
+  line; the offender is the line whose SF net is $0.01 above the product
+  (Q-02168: Installation - Trim Out Devices, 47 × $145.00 = $6,815.00 vs
+  SF $6,815.01).
+- In the quote grid (CSV order; rows ~19px pitch — the Permit row, #11,
+  double-clicked at ~(1357,724) in the 3412×931 session), double-click the
+  offending row → "Quote Item Detail" dialog.
+- Set the unit-price textbox (dialog-relative ~(1550,553)) to a 4-decimal
+  value whose extension rounds UP to the SF net — 47 × 145.0003 =
+  6,815.014 → $6,815.01. set_text accepts the 4 decimals; read back, OK.
+- Header total must now equal the Salesforce total exactly. Save (floppy)
+  → OK the print notice. Verified on Q-02168: $46,056.17 → $46,056.18.
+
+## Teach mode (how Step 5 was learned)
+- teach_logger.py (in this folder): POLLING recorder — foreground window,
+  clicks (with the control under the point), keystrokes → teach-log.jsonl
+  on the server; 20-min auto-stop; stop-file teach.stop.
+- NEVER use low-level hooks (WH_KEYBOARD_LL / WH_MOUSE_LL) again: v1
+  hooked the input path and froze Brandon's clicks mid-session
+  (2026-10-21). Polling (GetAsyncKeyState + GetForegroundWindow) can miss
+  an event but can never block one.
+- After distilling a recorded run into this playbook, DELETE the raw log
+  (it contains everything Brandon typed during the session).
 
 ## Acceptance check (every run)
 Account fields read back ✓ · phones on account + contacts ✓ · contacts
