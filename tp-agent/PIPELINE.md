@@ -164,6 +164,33 @@ see "Teach mode" below — and Papi verified every step + fixed the penny.)
 - After distilling a recorded run into this playbook, DELETE the raw log
   (it contains everything Brandon typed during the session).
 
+## Read-only database lookups (tp-agent v0.4+, added 2026-10-21)
+The agent has a `db_query` tool that reads the TigerPaw database directly
+(SQL Server, default instance on asap-tp, database Tigerpaw_v11 — NOT a
+named instance; "asap-tp\Tigerpaw_v11" = server + DB name). Auth is
+Brandon's own Windows login from the RDP box. Use it for ALL lookups
+(dedupe checks, account/contact details, quote totals, post-import
+verification) instead of clicking through the app.
+- Call: rpc.sh payload {"tool":"db_query","args":{"sql":"...","params":{"p0":...}}}
+  Values go in params as @p0/@p1 (bound parameters, never spliced).
+- SAFETY (Brandon's hard requirement — reads must never touch anything):
+  the tool only accepts a single SELECT/WITH...SELECT (write keywords
+  rejected outside literals), runs it in a transaction that is ALWAYS
+  rolled back, at READ UNCOMMITTED (no locks on live data), against a
+  fixed server/database. Writes happen ONLY through the app (Steps 2–5).
+- Every query is logged with timestamp + params to
+  C:\Users\btoth\tp-agent\db_query.log — Brandon can audit them all.
+- Key tables: tblAccounts (AccountNumber, AccountName, PrimaryEmailAddress,
+  SpecialInstructions, IsVendor), tblContacts (ContactNumber, AccountNumber,
+  FirstName, LastName, Title, PrimaryEmailAddress, MobilePhone),
+  tblQuotes (QuoteNumber, QuoteDescription, AccountNumber, TotalNetSell,
+  Status, Approved), tblQuoteDetail (QuoteNumber, LineNumber, ItemID,
+  Quantity, SellingPrice, TotalSellingPrice).
+- Verify a quote two ways: tblQuotes.TotalNetSell AND
+  SUM(TotalSellingPrice) over tblQuoteDetail — both must match Salesforce.
+- TechTrans reference: account 12871, TigerPaw quote **19871**, 20 lines,
+  $46,056.18 (verified both ways 2026-10-21).
+
 ## Acceptance check (every run)
 Account fields read back ✓ · phones on account + contacts ✓ · contacts
 saved (ids) ✓ · SI text ✓ · Vendor correct ✓ · quote lines + total

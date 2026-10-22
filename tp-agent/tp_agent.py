@@ -19,6 +19,7 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -27,7 +28,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "tp_agent_config.json")
 LOG_PATH = os.path.join(HERE, "tp_agent.log")
@@ -718,8 +719,167 @@ def tool_list_items(args):
         remote.close()
 
 
+# --------------------------------------------------------------------------
+# Read-only TigerPaw database queries (v0.4). SELECT only, enforced in
+# layers so a query can never change or corrupt the production data:
+#   1. The statement must be a single SELECT (or WITH...SELECT); write
+#      keywords are rejected outside string literals/comments.
+#   2. It runs inside a transaction that is ALWAYS rolled back.
+#   3. Isolation is READ UNCOMMITTED: the query takes no locks on live
+#      data, so it cannot block or slow down TigerPaw for anyone.
+#   4. Server/database are fixed; auth is Brandon's own Windows login
+#      (the same access TigerPaw itself uses from his workstation).
+#   5. Every query is appended to db_query.log next to this file so the
+#      owner can audit exactly what was asked, and when.
+# Values travel as bound parameters (@name), never string-spliced.
+# --------------------------------------------------------------------------
+DB_CONN = ("Server=asap-tp;Database=Tigerpaw_v11;Integrated Security=True;"
+           "ApplicationIntent=ReadOnly;Connect Timeout=10")
+DB_LOG_PATH = os.path.join(HERE, "db_query.log")
+DB_MAX_ROWS = 1000
+_DB_BAD = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE|"
+    r"GRANT|REVOKE|DENY|BACKUP|RESTORE|DBCC|SHUTDOWN|KILL|OPENROWSET|"
+    r"OPENDATASOURCE|BULK|INTO|WAITFOR)\b", re.I)
+
+_DB_PS = r"""
+$ErrorActionPreference = "Stop"
+try {
+  $j = [System.Text.Encoding]::UTF8.GetString(
+    [System.Convert]::FromBase64String("__PAYLOAD__")) | ConvertFrom-Json
+  $conn = New-Object System.Data.SqlClient.SqlConnection("__CONN__")
+  $conn.Open()
+  $tx = $conn.BeginTransaction([System.Data.IsolationLevel]::ReadUncommitted)
+  try {
+    $cmd = $conn.CreateCommand()
+    $cmd.Transaction = $tx
+    $cmd.CommandTimeout = 30
+    $cmd.CommandText = [string]$j.sql
+    foreach ($p in $j.params.PSObject.Properties) {
+      $v = $p.Value
+      if ($null -eq $v) { $v = [DBNull]::Value }
+      [void]$cmd.Parameters.AddWithValue("@" + $p.Name, $v)
+    }
+    $da = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
+    $dt = New-Object System.Data.DataTable
+    [void]$da.Fill($dt)
+    $rows = @()
+    foreach ($row in $dt.Rows) {
+      $o = [ordered]@{}
+      foreach ($col in $dt.Columns) {
+        $val = $row[$col]
+        if ($val -is [DBNull]) { $val = $null }
+        elseif ($val -is [datetime]) {
+          $val = $val.ToString("yyyy-MM-dd HH:mm:ss") }
+        elseif ($val -is [byte[]]) {
+          $val = "<bytes " + $val.Length + ">" }
+        $o[$col.ColumnName] = $val
+      }
+      $rows += [pscustomobject]$o
+      if ($rows.Count -ge __MAXROWS__) { break }
+    }
+    $out = @{ rows = $rows; rowcount = $rows.Count;
+              truncated = ($dt.Rows.Count -gt $rows.Count) } |
+      ConvertTo-Json -Depth 4 -Compress
+    Write-Output ("DBJSON:" + $out)
+  } finally {
+    $tx.Rollback()
+    $conn.Close()
+  }
+} catch {
+  Write-Output ("DBJSON:" + (@{ error = $_.Exception.Message } |
+    ConvertTo-Json -Compress))
+}
+"""
+
+
+def _strip_sql_literals(sql):
+    out = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append("''")
+        elif c == "-" and i + 1 < n and sql[i + 1] == "-":
+            while i < n and sql[i] not in "\r\n":
+                i += 1
+        elif c == "/" and i + 1 < n and sql[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _validate_select(sql):
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("empty sql")
+    probe = _strip_sql_literals(sql)
+    body = probe.strip().rstrip(";").strip()
+    if ";" in body:
+        raise ValueError("multiple statements are not allowed")
+    if not re.match(r"(?is)^(SELECT|WITH)\b", body):
+        raise ValueError("only SELECT queries are allowed")
+    m = _DB_BAD.search(body)
+    if m:
+        raise ValueError("forbidden keyword in query: %s" % m.group(1).upper())
+    return sql.strip().rstrip(";")
+
+
+def tool_db_query(args):
+    sql = _validate_select(args.get("sql", ""))
+    params = args.get("params") or {}
+    if not isinstance(params, dict):
+        raise ValueError("params must be an object")
+    for k in params:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
+            raise ValueError("bad param name: %r" % k)
+    timeout = int(args.get("timeout", 30))
+    timeout = max(5, min(timeout, 120))
+    payload = {"sql": sql, "params": params}
+    b64 = base64.b64encode(
+        json.dumps(payload).encode("utf-8")).decode("ascii")
+    ps = (_DB_PS.replace("__PAYLOAD__", b64)
+                .replace("__CONN__", DB_CONN)
+                .replace("__MAXROWS__", str(DB_MAX_ROWS)))
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True, timeout=timeout + 30)
+    out = proc.stdout.decode("utf-8", errors="replace")
+    err = proc.stderr.decode("utf-8", errors="replace")
+    try:
+        with open(DB_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("%s | %s | params=%s\n" % (
+                time.strftime("%Y-%m-%d %H:%M:%S"), sql,
+                json.dumps(params)[:500]))
+    except Exception:
+        pass
+    line = [l for l in out.splitlines() if l.strip().startswith("DBJSON:")]
+    if not line:
+        raise RuntimeError("db query failed: %s %s" % (
+            err.strip()[-500:], out.strip()[-500:]))
+    result = json.loads(line[-1][len("DBJSON:"):])
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError("db query error: %s" % result["error"])
+    return result
+
+
 TOOLS = {
     "ping": tool_ping,
+    "db_query": tool_db_query,
     "screenshot": tool_screenshot,
     "click": tool_click,
     "type_text": tool_type_text,
