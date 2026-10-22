@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""tp-db: named read-only TigerPaw lookups for Brandon (via tp-agent db_query).
+
+All queries are SELECT-only, enforced server-side by the tp-agent
+(SELECT validator + always-rollback transaction + READ UNCOMMITTED).
+Values are bound parameters, never string-spliced. Writes to TigerPaw
+happen ONLY through the TigerPaw app (see ../PIPELINE.md).
+
+Brandon's rep identity (verified 2026-10-21): RepNumber 147, Brandon Toth.
+
+Usage:
+  tp-db find-account <text>          accounts matching name/email/phone
+  tp-db account <number>             one account + contact count
+  tp-db contacts <account_number>    contacts on an account
+  tp-db quotes <account_number>      quotes on an account
+  tp-db quote <quote_number>         quote header + lines
+  tp-db my-jobs [--days N]           my quotes: sold/invoiced/paid/balance
+  tp-db my-invoices [--days N] [--unpaid]   my invoices (SalesRep=147)
+  tp-db my-payments [--days N]       payments applied to my invoices
+  tp-db my-commissions [--days N]    per-invoice commission rows for me
+  tp-db ask "<sql>"                  ad-hoc read-only SELECT
+Output: JSON.
+"""
+import json
+import subprocess
+import sys
+import tempfile
+import os
+
+RPC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rpc.sh")
+REP = 147
+
+
+def db_query(sql, params=None):
+    payload = {"tool": "db_query", "args": {"sql": sql, "params": params or {}}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        f.write(json.dumps(payload))
+        path = f.name
+    try:
+        out = subprocess.run([RPC, path], capture_output=True, text=True,
+                             timeout=180)
+    finally:
+        os.unlink(path)
+    d = json.loads(out.stdout)
+    if not d.get("ok"):
+        raise SystemExit("db_query error: %s" % d.get("error"))
+    return d["result"]
+
+
+def emit(result):
+    print(json.dumps(result, indent=1, default=str))
+
+
+def opt_days(argv, default=90):
+    if "--days" in argv:
+        return int(argv[argv.index("--days") + 1])
+    return default
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 1
+    cmd, rest = argv[0], argv[1:]
+
+    if cmd == "find-account":
+        text = " ".join(rest)
+        like = "%" + text + "%"
+        digits = "".join(c for c in text if c.isdigit())
+        sql = ("SELECT TOP 25 AccountNumber, AccountName, City, State, "
+               "AccountStatus, AccountType, PrimaryPhoneNumber, "
+               "PrimaryEmailAddress FROM tblAccounts WHERE AccountName LIKE @p0 "
+               "OR PrimaryEmailAddress LIKE @p0 OR PrimaryPhoneNumber LIKE @p1 "
+               "ORDER BY AccountName")
+        emit(db_query(sql, {"p0": like, "p1": "%" + digits + "%" if digits else like}))
+
+    elif cmd == "account":
+        n = int(rest[0])
+        acct = db_query(
+            "SELECT AccountNumber, AccountName, Address1, Address2, City, "
+            "State, PostalCode, AccountType, AccountStatus, AccountSource, "
+            "PrimaryPhoneNumber, PrimaryEmailAddress, SpecialInstructions, "
+            "IsVendor, RepNumber FROM tblAccounts WHERE AccountNumber=@p0",
+            {"p0": n})
+        cnts = db_query(
+            "SELECT COUNT(*) AS contacts FROM tblContacts "
+            "WHERE AccountNumber=@p0", {"p0": n})
+        emit({"account": acct["rows"], "contact_count": cnts["rows"]})
+
+    elif cmd == "contacts":
+        n = int(rest[0])
+        emit(db_query(
+            "SELECT ContactNumber, FirstName, LastName, Title, "
+            "PrimaryEmailAddress, PrimaryPhoneNumber, MobilePhone, Inactive "
+            "FROM tblContacts WHERE AccountNumber=@p0 ORDER BY ContactNumber",
+            {"p0": n}))
+
+    elif cmd == "quotes":
+        n = int(rest[0])
+        emit(db_query(
+            "SELECT QuoteNumber, QuoteDescription, QuoteDate, Status, "
+            "Approved, TotalNetSell, Cost, Margin, RepNumber FROM tblQuotes "
+            "WHERE AccountNumber=@p0 ORDER BY QuoteNumber DESC", {"p0": n}))
+
+    elif cmd == "quote":
+        n = int(rest[0])
+        head = db_query(
+            "SELECT QuoteNumber, QuoteDescription, QuoteDate, AccountNumber, "
+            "Status, Approved, TotalNetSell, Cost, Margin, Lines, RepNumber "
+            "FROM tblQuotes WHERE QuoteNumber=@p0", {"p0": n})
+        lines = db_query(
+            "SELECT LineNumber, ItemID, ItemDescription, Quantity, "
+            "SellingPrice, TotalSellingPrice, Cost, TotalCost, "
+            "InstallLocation FROM tblQuoteDetail WHERE QuoteNumber=@p0 "
+            "ORDER BY LineNumber", {"p0": n})
+        emit({"quote": head["rows"], "lines": lines["rows"]})
+
+    elif cmd == "my-jobs":
+        days = opt_days(rest)
+        emit(db_query(
+            "SELECT TOP 100 QuoteNumber, AccountName, QuotesTotalNetSell, "
+            "InvoiceTotal, AmountPaid, TotalCredit, BalanceDue, DateClosed, "
+            "ApprovedDate FROM tvwr_QuoteSOInvoiceCM "
+            "WHERE QuoteRepNumber=@rep AND (BalanceDue > 0 OR "
+            "DateClosed >= DATEADD(day, -@days, GETDATE())) "
+            "ORDER BY BalanceDue DESC, DateClosed DESC",
+            {"rep": REP, "days": days}))
+
+    elif cmd == "my-invoices":
+        days = opt_days(rest)
+        unpaid = "--unpaid" in rest
+        sql = ("SELECT TOP 100 i.InvoiceNumber, i.InvoiceDate, "
+               "a.AccountName, i.QuoteNumber, i.Status, i.TotalNetInvoice, "
+               "i.TotalAmountDue, i.PaidDate FROM tblInvoices i "
+               "JOIN tblAccounts a ON a.AccountNumber = i.AccountNumber "
+               "WHERE i.SalesRep=@rep AND i.InvoiceDate >= DATEADD(day, "
+               "-@days, GETDATE())")
+        if unpaid:
+            sql += " AND i.PaidDate IS NULL AND i.TotalAmountDue > 0"
+        sql += " ORDER BY i.InvoiceDate DESC"
+        emit(db_query(sql, {"rep": REP, "days": days}))
+
+    elif cmd == "my-payments":
+        days = opt_days(rest)
+        emit(db_query(
+            "SELECT TOP 100 p.PaymentDate, p.InvoiceNumber, a.AccountName, "
+            "p.ApplyToPaymentAmount, p.ApplyToDiscountAmount FROM "
+            "tblARPayments p JOIN tblInvoices i ON i.InvoiceNumber = "
+            "p.InvoiceNumber JOIN tblAccounts a ON a.AccountNumber = "
+            "i.AccountNumber WHERE i.SalesRep=@rep AND p.PaymentDate >= "
+            "DATEADD(day, -@days, GETDATE()) ORDER BY p.PaymentDate DESC",
+            {"rep": REP, "days": days}))
+
+    elif cmd == "my-commissions":
+        days = opt_days(rest)
+        emit(db_query(
+            "SELECT TOP 200 AccountName, InvoiceNumber, InvoiceDate, "
+            "PaidDate, Status, QuoteNumber, ContractNumber, TotalNetSell, "
+            "Profit, Margin, Commission, CommissionNet, CommissionProfit "
+            "FROM tvwr_InvoiceCommissionByRep WHERE RepNumber=@rep AND "
+            "InvoiceDate >= DATEADD(day, -@days, GETDATE()) "
+            "ORDER BY InvoiceDate DESC",
+            {"rep": REP, "days": days}))
+
+    elif cmd == "ask":
+        emit(db_query(" ".join(rest)))
+
+    else:
+        print(__doc__)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
